@@ -15,9 +15,15 @@ struct window_size {
 
 typedef enum { NORMAL, INSERT } MODE;
 
+struct cursor {
+  int x;
+  int y;
+};
+
 struct editor_config {
   struct termios orig_termios;
   struct window_size ws;
+  struct cursor cur;
   MODE mode;
 };
 
@@ -154,7 +160,11 @@ void refresh_screen() {
   buffer_append(&buf, "\x1b[H", 3);
 
   draw_rows(&buf);
-  buffer_append(&buf, "\x1b[H", 3);
+
+  char bu[32];
+  snprintf(bu, sizeof(bu), "\x1b[%d;%dH", E.cur.y + 1, E.cur.x + 1);
+  buffer_append(&buf, bu, strlen(bu));
+
   buffer_append(&buf, "\x1b[?25h", 6);
 
   write(STDOUT_FILENO, buf.b, buf.len);
@@ -224,6 +234,8 @@ void on_keypress() {
 int main() {
   setlocale(LC_ALL, "");
   E.mode = NORMAL;
+  E.cur.x = 0;
+  E.cur.y = 0;
   enable_raw_mode();
   init_editor();
 
