@@ -8,6 +8,18 @@
 #include <termios.h>
 #include <unistd.h>
 
+enum editor_key {
+  ARROW_LEFT = 1000,
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN,
+  PAGE_UP,
+  DEL_KEY,
+  HOME_KEY,
+  END_KEY,
+  PAGE_DOWN
+};
+
 struct window_size {
   int rows;
   int columns;
@@ -171,16 +183,71 @@ void refresh_screen() {
   buffer_free(&buf);
 }
 
-char read_key() {
+int read_key() {
   int nread;
   char c;
   while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
     if (nread == -1 && errno != EAGAIN)
       die("read");
   }
+  if (c == '\x1b') {
+    char seq[3];
+
+    if (read(STDIN_FILENO, &seq[0], 1) != 1)
+      return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1)
+      return '\x1b';
+
+    if (seq[0] == '[') {
+      if (seq[1] >= '0' && seq[1] <= '9') {
+        if (read(STDIN_FILENO, &seq[2], 1) != 1)
+          return '\x1b';
+        if (seq[2] == '~') {
+          switch (seq[1]) {
+          case '5':
+            return PAGE_UP;
+          case '6':
+            return PAGE_DOWN;
+          case '1':
+            return HOME_KEY;
+          case '4':
+            return END_KEY;
+          case '7':
+            return HOME_KEY;
+          case '8':
+            return END_KEY;
+          }
+        }
+      } else {
+        switch (seq[1]) {
+        case 'A':
+          return ARROW_UP;
+        case 'B':
+          return ARROW_DOWN;
+        case 'C':
+          return ARROW_RIGHT;
+        case 'D':
+          return ARROW_LEFT;
+        case 'H':
+          return HOME_KEY;
+        case 'F':
+          return END_KEY;
+        }
+      }
+    } else if (seq[0] == 'O') {
+      switch (seq[1]) {
+      case 'H':
+        return HOME_KEY;
+      case 'F':
+        return END_KEY;
+      }
+    }
+    return '\x1b';
+  } else {
+    return c;
+  }
   return c;
 }
-
 int cursor_position(int *rows, int *cols) {
   if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4)
     return -1;
@@ -221,12 +288,58 @@ void init_editor() {
     die("window_size");
 }
 
+void move_cursor(int key) {
+  switch (key) {
+  case ARROW_LEFT:
+    if (E.cur.x != 0) {
+      E.cur.x--;
+      break;
+    }
+  case ARROW_DOWN:
+    if (E.cur.y != E.ws.rows - 1) {
+      E.cur.y++;
+      break;
+    }
+  case ARROW_UP:
+    if (E.cur.y != 0) {
+      E.cur.y--;
+      break;
+    }
+  case ARROW_RIGHT:
+    if (E.cur.x != E.ws.columns - 1) {
+      E.cur.x++;
+      break;
+    }
+  }
+}
+
 void on_keypress() {
-  char c = read_key();
+  int c = read_key();
   switch (c) {
   case CTRL_KEY('q'):
     refresh_screen();
     exit(0);
+    break;
+
+  case HOME_KEY:
+    E.cur.x = 0;
+    break;
+  case END_KEY:
+    E.cur.x = E.ws.columns - 1;
+    break;
+
+  case PAGE_UP:
+  case PAGE_DOWN: {
+    int times = E.ws.rows;
+    while (times--)
+      move_cursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+  } break;
+
+  case ARROW_UP:
+  case ARROW_DOWN:
+  case ARROW_LEFT:
+  case ARROW_RIGHT:
+    move_cursor(c);
     break;
   }
 }
