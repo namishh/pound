@@ -170,18 +170,8 @@ void scroll() {
   }
 }
 
-void draw_statusbar(struct buffer *b) {
-  buffer_append(b, "\x1b[7m", 4);
-  int len = 0;
-  while (len < E.ws.columns) {
-    buffer_append(b, " ", 1);
-    len++;
-  }
-  buffer_append(b, "\x1b[m", 3);
-}
-
-void draw_tabline(struct buffer *b) {
-  buffer_append(b, "\x1b[7m", 4);
+void status_bar(struct buffer *b) {
+  buffer_append(b, "\x1b[100m", 6);
   int len = 0;
   while (len < E.ws.columns) {
     buffer_append(b, " ", 1);
@@ -203,9 +193,9 @@ void draw_rows(struct buffer *b) {
       }
     } else {
       char line_number[findn(E.nrows) + 1];
-      sprintf(line_number, "%s ",
+      sprintf(line_number, "\x1b[30m%s\x1b[0m ",
               pad_with_zeros(y + E.rowoff + 1, findn(E.nrows)));
-      buffer_append(b, line_number, findn(E.nrows) + 2);
+      buffer_append(b, line_number, findn(E.nrows) + 10);
       int len = E.r[filerow].rsize - E.coloff;
       if (len < 0)
         len = 0;
@@ -267,12 +257,11 @@ void refresh_screen() {
   // H -> Mouse Command
   buffer_append(&buf, "\x1b[H", 3);
 
-  draw_tabline(&buf);
   draw_rows(&buf);
-  draw_statusbar(&buf);
+  status_bar(&buf);
 
   char bu[32];
-  snprintf(bu, sizeof(bu), "\x1b[%d;%dH", E.cur.y - E.rowoff + 2,
+  snprintf(bu, sizeof(bu), "\x1b[%d;%dH", E.cur.y - E.rowoff + 1,
            E.rx - E.coloff + findn(E.nrows) + 2);
   buffer_append(&buf, bu, strlen(bu));
 
@@ -393,8 +382,7 @@ void init_editor() {
   E.r = NULL;
   if (window_size(&E.ws.rows, &E.ws.columns) == -1)
     die("window_size");
-
-  E.ws.rows -= 2;
+  E.ws.rows -= 1;
 }
 
 void move_cursor(int key) {
@@ -410,7 +398,7 @@ void move_cursor(int key) {
     }
     break;
   case ARROW_DOWN:
-    if (E.cur.y < E.nrows) {
+    if (E.cur.y < E.nrows - 1) {
       E.cur.y++;
     }
     break;
@@ -462,7 +450,8 @@ void on_keypress_normal() {
     break;
 
   case '0':
-    E.cur.x = 0;
+    if (E.cur.y < E.nrows)
+      E.cur.x = E.r[E.cur.y].size;
     break;
 
   case '$':
