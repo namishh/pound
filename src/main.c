@@ -32,6 +32,8 @@ struct window_size {
 
 typedef struct row {
   int size;
+  int rsize;
+  char *render;
   char *chars;
 } row;
 
@@ -46,6 +48,7 @@ struct editor_config {
   struct termios orig_termios;
   struct window_size ws;
   struct cursor cur;
+  int rx;
   int nrows;
   int rowoff;
   int coloff;
@@ -132,7 +135,25 @@ char *pad_with_zeros(int number, int digits) {
   return result;
 }
 
+int ctrx(row *r, int cx) {
+  int rx = 0;
+  int j;
+  for (j = 0; j < cx; j++) {
+    if (r->chars[j] == '\t')
+      rx += (2 - 1) - (rx % 2);
+    rx++;
+  }
+  return rx;
+}
+
 void scroll() {
+
+  E.rx = 0;
+  if (E.cur.y < E.nrows) {
+    E.rx = ctrx(&E.r[E.cur.y], E.cur.x);
+  }
+
+  E.rx = E.cur.x;
   // Vertical Scrolling
   if (E.cur.y < E.rowoff) {
     E.rowoff = E.cur.y;
@@ -141,12 +162,32 @@ void scroll() {
     E.rowoff = E.cur.y - E.ws.rows + 1;
   }
   // Horizontal Scrolling
-  if (E.cur.x < E.coloff) {
-    E.coloff = E.cur.x;
+  if (E.rx < E.coloff) {
+    E.coloff = E.rx;
   }
-  if (E.cur.x >= E.coloff + E.ws.columns) {
-    E.coloff = E.cur.x - E.ws.columns + 1;
+  if (E.rx >= E.coloff + E.ws.columns) {
+    E.coloff = E.rx - E.ws.columns + 1;
   }
+}
+
+void draw_statusbar(struct buffer *b) {
+  buffer_append(b, "\x1b[7m", 4);
+  int len = 0;
+  while (len < E.ws.columns) {
+    buffer_append(b, " ", 1);
+    len++;
+  }
+  buffer_append(b, "\x1b[m", 3);
+}
+
+void draw_tabline(struct buffer *b) {
+  buffer_append(b, "\x1b[7m", 4);
+  int len = 0;
+  while (len < E.ws.columns) {
+    buffer_append(b, " ", 1);
+    len++;
+  }
+  buffer_append(b, "\x1b[m", 3);
 }
 
 void draw_rows(struct buffer *b) {
@@ -165,18 +206,16 @@ void draw_rows(struct buffer *b) {
       sprintf(line_number, "%s ",
               pad_with_zeros(y + E.rowoff + 1, findn(E.nrows)));
       buffer_append(b, line_number, findn(E.nrows) + 2);
-      int len = E.r[filerow].size - E.coloff;
+      int len = E.r[filerow].rsize - E.coloff;
       if (len < 0)
         len = 0;
       if (len > E.ws.columns)
         len = E.ws.columns;
-      buffer_append(b, &E.r[filerow].chars[E.coloff], len);
+      buffer_append(b, &E.r[filerow].render[E.coloff], len);
     }
     // clearing line by line instead of the whole screen
     buffer_append(b, "\x1b[K", 3);
-    if (y < E.ws.rows - 1) {
-      buffer_append(b, "\r\n", 2);
-    }
+    buffer_append(b, "\r\n", 2);
   }
 }
 
@@ -228,11 +267,13 @@ void refresh_screen() {
   // H -> Mouse Command
   buffer_append(&buf, "\x1b[H", 3);
 
+  draw_tabline(&buf);
   draw_rows(&buf);
+  draw_statusbar(&buf);
 
   char bu[32];
-  snprintf(bu, sizeof(bu), "\x1b[%d;%dH", E.cur.y - E.rowoff + 1,
-           E.cur.x - E.coloff + findn(E.nrows) + 1);
+  snprintf(bu, sizeof(bu), "\x1b[%d;%dH", E.cur.y - E.rowoff + 2,
+           E.rx - E.coloff + findn(E.nrows) + 2);
   buffer_append(&buf, bu, strlen(bu));
 
   buffer_append(&buf, "\x1b[?25h", 6);
@@ -346,11 +387,14 @@ void init_editor() {
   E.nrows = 0;
   E.coloff = 0;
   E.rowoff = 0;
+  E.rx = 0;
   E.cur.x = 0;
   E.cur.y = 0;
   E.r = NULL;
   if (window_size(&E.ws.rows, &E.ws.columns) == -1)
     die("window_size");
+
+  E.ws.rows -= 2;
 }
 
 void move_cursor(int key) {
@@ -417,6 +461,15 @@ void on_keypress_normal() {
     move_cursor(ARROW_RIGHT);
     break;
 
+  case '0':
+    E.cur.x = 0;
+    break;
+
+  case '$':
+    if (E.cur.y < E.nrows)
+      E.cur.x = E.r[E.cur.y].size;
+    break;
+
   case 'G':
     E.cur.y = E.nrows;
     break;
@@ -430,6 +483,32 @@ void on_keypress_normal() {
   E.hist.prev_key = c;
 }
 
+void update_row(row *r) {
+  int tabs = 0;
+  int j;
+  for (j = 0; j < r->size; j++)
+    if (r->chars[j] == '\t')
+      tabs++;
+
+  free(r->render);
+  r->render = malloc(r->size + tabs * 7 + 1);
+
+  int idx = 0;
+
+  for (j = 0; j < r->size; j++) {
+    if (r->chars[j] == '\t') {
+      r->render[idx++] = ' ';
+      while (idx % 2 != 0)
+        r->render[idx++] = ' ';
+    } else {
+      r->render[idx++] = r->chars[j];
+    }
+  }
+
+  r->render[idx] = '\0';
+  r->rsize = idx;
+}
+
 void append_row(char *s, size_t len) {
   E.r = realloc(E.r, sizeof(row) * (E.nrows + 1));
 
@@ -438,6 +517,11 @@ void append_row(char *s, size_t len) {
   E.r[at].chars = malloc(len + 1);
   memcpy(E.r[at].chars, s, len);
   E.r[at].chars[len] = '\0';
+
+  E.r[at].rsize = 0;
+  E.r[at].render = NULL;
+  update_row(&E.r[at]);
+
   E.nrows++;
 }
 
@@ -474,10 +558,12 @@ void on_keypress_insert() {
     break;
 
   case HOME_KEY:
-    E.cur.x = findn(E.nrows) + 1;
+    E.cur.x = 0;
     break;
+
   case END_KEY:
-    E.cur.x = E.ws.columns - 1;
+    if (E.cur.y < E.nrows)
+      E.cur.x = E.r[E.cur.y].size;
     break;
 
   case PAGE_UP:
