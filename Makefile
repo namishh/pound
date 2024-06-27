@@ -1,6 +1,6 @@
 CC = cc
 CFLAGS = -Wall -g
-LDFLAGS =
+LDFLAGS = -lm
 TARGET_EXEC := main.out
 
 BUILD_DIR := ./build

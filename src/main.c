@@ -1,6 +1,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <locale.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,11 @@ struct window_size {
   int columns;
 };
 
+typedef struct row {
+  int size;
+  char *chars;
+} row;
+
 typedef enum { NORMAL, INSERT } MODE;
 
 struct cursor {
@@ -40,6 +46,8 @@ struct editor_config {
   struct termios orig_termios;
   struct window_size ws;
   struct cursor cur;
+  int nrows;
+  row r;
   struct history hist;
   MODE mode;
 };
@@ -88,9 +96,8 @@ void dashboard_insert_line(char line[], struct buffer *b) {
   if (len > E.ws.columns) {
     len = E.ws.columns;
   }
-  int padding = (E.ws.columns - len) / 2 + 30;
+  int padding = (E.ws.columns - len) / 2 + 37;
   if (padding) {
-    buffer_append(b, "~", 1);
     padding--;
   }
   while (padding--)
@@ -110,23 +117,37 @@ char *dashboard_lines[] = {
     "⢀⠄⠄⣿⣿⣷⣬⣵⣿⣿⣿⣿⣿⣿⣿⣷⣟⢷⡶⢗⡰⣿⣿⠇⠘⠄⠄⠄⠄⠄                             ",
     "⣿⠄⠄⠘⢿⣿⣿⣿⣿⣿⣿⢛⣿⣿⣿⣿⣿⣿⣿⣿⣿⣟⢄⡆⠄⢀⣪⡆⠄⣿                             "};
 
+int findn(int num) {
+  /* math.h included */
+  if (num == 0)
+    return 1;
+  return (int)log10(num) + 1;
+}
+
 void draw_rows(struct buffer *b) {
   int y;
   for (y = 0; y < E.ws.rows; y++) {
-
-    if (y == E.ws.rows / 2) {
-      for (size_t i = 0;
-           i < sizeof(dashboard_lines) / sizeof(dashboard_lines[0]); i++) {
-        dashboard_insert_line(dashboard_lines[i], b);
+    if (y >= E.nrows) {
+      if (E.nrows == 0 && y == E.ws.rows / 2) {
+        for (size_t i = 0;
+             i < sizeof(dashboard_lines) / sizeof(dashboard_lines[0]); i++) {
+          dashboard_insert_line(dashboard_lines[i], b);
+        }
+      } else {
       }
-      buffer_append(b, "~", 1);
+      // clearing line by line instead of the whole screen
+      buffer_append(b, "\x1b[K", 3);
+      if (y < E.ws.rows - 1) {
+        buffer_append(b, "\r\n", 2);
+      }
     } else {
-      buffer_append(b, "~", 1);
-    }
-    // clearing line by line instead of the whole screen
-    buffer_append(b, "\x1b[K", 3);
-    if (y < E.ws.rows - 1) {
-      buffer_append(b, "\r\n", 2);
+      char line_number[findn(E.nrows) + 1];
+      sprintf(line_number, "%d ", y + 1);
+      buffer_append(b, line_number, findn(E.nrows) + 1);
+      int len = E.r.size;
+      if (len > E.ws.columns)
+        len = E.ws.columns;
+      buffer_append(b, E.r.chars, len);
     }
   }
 }
@@ -318,7 +339,7 @@ void move_cursor(int key) {
   }
 }
 
-void on_keypress() {
+void on_keypress_normal() {
   int c = read_key();
   switch (c) {
   case CTRL_KEY('q'):
@@ -327,36 +348,22 @@ void on_keypress() {
     break;
 
   case 'i':
-    if (E.mode == NORMAL) {
-      E.mode = INSERT;
-    }
-    break;
-
-  // escape key
-  case '\x1b':
-    E.mode = NORMAL;
+    E.mode = INSERT;
     break;
 
   case 'h':
-    if (E.mode == NORMAL) {
-      move_cursor(ARROW_LEFT);
-    }
+    move_cursor(ARROW_LEFT);
     break;
   case 'j':
-    if (E.mode == NORMAL) {
-      move_cursor(ARROW_DOWN);
-    }
+    move_cursor(ARROW_DOWN);
     break;
   case 'k':
-    if (E.mode == NORMAL) {
-      move_cursor(ARROW_UP);
-    }
+    move_cursor(ARROW_UP);
     break;
   case 'l':
-    if (E.mode == NORMAL) {
-      move_cursor(ARROW_RIGHT);
-    }
+    move_cursor(ARROW_RIGHT);
     break;
+
   case 'G':
     if (E.mode == NORMAL) {
       int times = E.ws.rows;
@@ -365,11 +372,52 @@ void on_keypress() {
     }
     break;
   case 'g':
-    if (E.mode == NORMAL && E.hist.prev_key == 'g') {
+    if (E.hist.prev_key == 'g') {
       int times = E.ws.rows;
-      while (times--)
-        move_cursor(ARROW_UP);
+      if (times > 0) {
+        while (times--)
+          move_cursor(ARROW_UP);
+      }
     }
+    break;
+  }
+
+  E.hist.prev_key = c;
+}
+
+void editor_open(char *filename) {
+  FILE *fp = fopen(filename, "r");
+  if (!fp)
+    die("fopen");
+  char *line = NULL;
+  size_t linecap = 0;
+  ssize_t linelen;
+  linelen = getline(&line, &linecap, fp);
+  if (linelen != -1) {
+    while (linelen > 0 &&
+           (line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
+      linelen--;
+    E.r.size = linelen;
+    E.r.chars = malloc(linelen + 1);
+    memcpy(E.r.chars, line, linelen);
+    E.r.chars[linelen] = '\0';
+    E.nrows = 1;
+  }
+  free(line);
+  fclose(fp);
+}
+
+void on_keypress_insert() {
+  int c = read_key();
+  switch (c) {
+  case CTRL_KEY('q'):
+    refresh_screen();
+    exit(0);
+    break;
+
+  // escape key
+  case '\x1b':
+    E.mode = NORMAL;
     break;
 
   case HOME_KEY:
@@ -397,17 +445,26 @@ void on_keypress() {
   E.hist.prev_key = c;
 }
 
-int main() {
+// taking in arguments
+int main(int argc, char *argv[]) {
   setlocale(LC_ALL, "");
   E.mode = NORMAL;
+  E.nrows = 0;
   E.cur.x = 0;
   E.cur.y = 0;
   enable_raw_mode();
   init_editor();
 
+  if (argc >= 2) {
+    editor_open(argv[1]);
+  }
+
   while (1) {
     refresh_screen();
-    on_keypress();
+    if (E.mode == NORMAL)
+      on_keypress_normal();
+    else if (E.mode == INSERT)
+      on_keypress_insert();
   }
 
   return 0;
