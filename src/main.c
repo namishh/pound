@@ -20,6 +20,10 @@ enum editor_key {
   PAGE_DOWN
 };
 
+struct history {
+  char prev_key;
+};
+
 struct window_size {
   int rows;
   int columns;
@@ -36,6 +40,7 @@ struct editor_config {
   struct termios orig_termios;
   struct window_size ws;
   struct cursor cur;
+  struct history hist;
   MODE mode;
 };
 
@@ -321,6 +326,52 @@ void on_keypress() {
     exit(0);
     break;
 
+  case 'i':
+    if (E.mode == NORMAL) {
+      E.mode = INSERT;
+    }
+    break;
+
+  // escape key
+  case '\x1b':
+    E.mode = NORMAL;
+    break;
+
+  case 'h':
+    if (E.mode == NORMAL) {
+      move_cursor(ARROW_LEFT);
+    }
+    break;
+  case 'j':
+    if (E.mode == NORMAL) {
+      move_cursor(ARROW_DOWN);
+    }
+    break;
+  case 'k':
+    if (E.mode == NORMAL) {
+      move_cursor(ARROW_UP);
+    }
+    break;
+  case 'l':
+    if (E.mode == NORMAL) {
+      move_cursor(ARROW_RIGHT);
+    }
+    break;
+  case 'G':
+    if (E.mode == NORMAL) {
+      int times = E.ws.rows;
+      while (times--)
+        move_cursor(ARROW_DOWN);
+    }
+    break;
+  case 'g':
+    if (E.mode == NORMAL && E.hist.prev_key == 'g') {
+      int times = E.ws.rows;
+      while (times--)
+        move_cursor(ARROW_UP);
+    }
+    break;
+
   case HOME_KEY:
     E.cur.x = 0;
     break;
@@ -342,6 +393,8 @@ void on_keypress() {
     move_cursor(c);
     break;
   }
+
+  E.hist.prev_key = c;
 }
 
 int main() {
