@@ -1,4 +1,4 @@
-CC = cc
+CC = gcc
 CFLAGS = -Wall -g
 LDFLAGS = -lm
 TARGET_EXEC := main.out

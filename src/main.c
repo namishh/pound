@@ -47,7 +47,9 @@ struct editor_config {
   struct window_size ws;
   struct cursor cur;
   int nrows;
-  row r;
+  int rowoff;
+  int coloff;
+  row *r;
   struct history hist;
   MODE mode;
 };
@@ -80,7 +82,7 @@ void buffer_free(struct buffer *buf) { free(buf->b); }
 struct editor_config E;
 
 void die(const char *s) {
-  write(STDIN_FILENO, "\x1b[2J", 4);
+  write(STDOUT_FILENO, "\x1b[2J", 4);
   write(STDOUT_FILENO, "\x1b[H", 3);
   perror(s);
   exit(1);
@@ -124,30 +126,56 @@ int findn(int num) {
   return (int)log10(num) + 1;
 }
 
+char *pad_with_zeros(int number, int digits) {
+  char *result = (char *)malloc(digits + 1); // +1 for the null terminator
+  sprintf(result, "%0*d", digits, number);
+  return result;
+}
+
+void scroll() {
+  // Vertical Scrolling
+  if (E.cur.y < E.rowoff) {
+    E.rowoff = E.cur.y;
+  }
+  if (E.cur.y >= E.rowoff + E.ws.rows) {
+    E.rowoff = E.cur.y - E.ws.rows + 1;
+  }
+  // Horizontal Scrolling
+  if (E.cur.x < E.coloff) {
+    E.coloff = E.cur.x;
+  }
+  if (E.cur.x >= E.coloff + E.ws.columns) {
+    E.coloff = E.cur.x - E.ws.columns + 1;
+  }
+}
+
 void draw_rows(struct buffer *b) {
   int y;
   for (y = 0; y < E.ws.rows; y++) {
-    if (y >= E.nrows) {
+    int filerow = y + E.rowoff;
+    if (filerow >= E.nrows) {
       if (E.nrows == 0 && y == E.ws.rows / 2) {
         for (size_t i = 0;
              i < sizeof(dashboard_lines) / sizeof(dashboard_lines[0]); i++) {
           dashboard_insert_line(dashboard_lines[i], b);
         }
-      } else {
-      }
-      // clearing line by line instead of the whole screen
-      buffer_append(b, "\x1b[K", 3);
-      if (y < E.ws.rows - 1) {
-        buffer_append(b, "\r\n", 2);
       }
     } else {
       char line_number[findn(E.nrows) + 1];
-      sprintf(line_number, "%d ", y + 1);
-      buffer_append(b, line_number, findn(E.nrows) + 1);
-      int len = E.r.size;
+      sprintf(line_number, "%s ",
+              pad_with_zeros(y + E.rowoff + 1, findn(E.nrows)));
+      buffer_append(b, line_number, findn(E.nrows) + 2);
+      int len = E.r[filerow].size - E.coloff;
+      if (len < 0)
+        len = 0;
       if (len > E.ws.columns)
         len = E.ws.columns;
-      buffer_append(b, E.r.chars, len);
+      buffer_append(b, &E.r[filerow].chars[E.coloff], len);
+    }
+    // clearing line by line instead of the whole screen
+    buffer_append(b, "\x1b[K", 3);
+    if (y < E.ws.rows - 1) {
+      buffer_append(b, "\r\n", 2);
     }
   }
 }
@@ -188,6 +216,9 @@ void enable_raw_mode() {
 }
 
 void refresh_screen() {
+
+  scroll();
+
   struct buffer buf = BUFFER_INIT;
   // \xib -> escape character
   // URL - https://vt100.net/docs/vt100-ug/chapter3.html#ED
@@ -200,7 +231,8 @@ void refresh_screen() {
   draw_rows(&buf);
 
   char bu[32];
-  snprintf(bu, sizeof(bu), "\x1b[%d;%dH", E.cur.y + 1, E.cur.x + 1);
+  snprintf(bu, sizeof(bu), "\x1b[%d;%dH", E.cur.y - E.rowoff + 1,
+           E.cur.x - E.coloff + findn(E.nrows) + 1);
   buffer_append(&buf, bu, strlen(bu));
 
   buffer_append(&buf, "\x1b[?25h", 6);
@@ -310,32 +342,53 @@ int window_size(int *rows, int *cols) {
 }
 
 void init_editor() {
+  E.mode = NORMAL;
+  E.nrows = 0;
+  E.coloff = 0;
+  E.rowoff = 0;
+  E.cur.x = 0;
+  E.cur.y = 0;
+  E.r = NULL;
   if (window_size(&E.ws.rows, &E.ws.columns) == -1)
     die("window_size");
 }
 
 void move_cursor(int key) {
+  row *r = (E.cur.y >= E.nrows) ? NULL : &E.r[E.cur.y];
+
   switch (key) {
   case ARROW_LEFT:
-    if (E.cur.x != 0) {
+    if (E.cur.x >= 0) {
       E.cur.x--;
-      break;
+    } else if (E.cur.y > 0) {
+      E.cur.y--;
+      E.cur.x = E.r[E.cur.y].size;
     }
+    break;
   case ARROW_DOWN:
-    if (E.cur.y != E.ws.rows - 1) {
+    if (E.cur.y < E.nrows) {
       E.cur.y++;
-      break;
     }
+    break;
   case ARROW_UP:
     if (E.cur.y != 0) {
       E.cur.y--;
-      break;
     }
+    break;
   case ARROW_RIGHT:
-    if (E.cur.x != E.ws.columns - 1) {
+    if (r && E.cur.x < r->size) {
       E.cur.x++;
-      break;
+    } else if (r && E.cur.x == r->size) {
+      E.cur.y++;
+      E.cur.x = 0;
     }
+    break;
+  }
+
+  r = (E.cur.y >= E.nrows) ? NULL : &E.r[E.cur.y];
+  int rowlen = r ? r->size : 0;
+  if (E.cur.x > rowlen) {
+    E.cur.x = rowlen;
   }
 }
 
@@ -343,7 +396,7 @@ void on_keypress_normal() {
   int c = read_key();
   switch (c) {
   case CTRL_KEY('q'):
-    refresh_screen();
+    die("Exit Pound");
     exit(0);
     break;
 
@@ -365,24 +418,27 @@ void on_keypress_normal() {
     break;
 
   case 'G':
-    if (E.mode == NORMAL) {
-      int times = E.ws.rows;
-      while (times--)
-        move_cursor(ARROW_DOWN);
-    }
+    E.cur.y = E.nrows;
     break;
   case 'g':
     if (E.hist.prev_key == 'g') {
-      int times = E.ws.rows;
-      if (times > 0) {
-        while (times--)
-          move_cursor(ARROW_UP);
-      }
+      E.cur.y = 0;
     }
     break;
   }
 
   E.hist.prev_key = c;
+}
+
+void append_row(char *s, size_t len) {
+  E.r = realloc(E.r, sizeof(row) * (E.nrows + 1));
+
+  int at = E.nrows;
+  E.r[at].size = len;
+  E.r[at].chars = malloc(len + 1);
+  memcpy(E.r[at].chars, s, len);
+  E.r[at].chars[len] = '\0';
+  E.nrows++;
 }
 
 void editor_open(char *filename) {
@@ -393,16 +449,13 @@ void editor_open(char *filename) {
   size_t linecap = 0;
   ssize_t linelen;
   linelen = getline(&line, &linecap, fp);
-  if (linelen != -1) {
+  while ((linelen = getline(&line, &linecap, fp)) != -1) {
     while (linelen > 0 &&
            (line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
       linelen--;
-    E.r.size = linelen;
-    E.r.chars = malloc(linelen + 1);
-    memcpy(E.r.chars, line, linelen);
-    E.r.chars[linelen] = '\0';
-    E.nrows = 1;
+    append_row(line, linelen);
   }
+  E.cur.x = findn(E.nrows) + 1;
   free(line);
   fclose(fp);
 }
@@ -411,7 +464,7 @@ void on_keypress_insert() {
   int c = read_key();
   switch (c) {
   case CTRL_KEY('q'):
-    refresh_screen();
+    die("Exited");
     exit(0);
     break;
 
@@ -421,7 +474,7 @@ void on_keypress_insert() {
     break;
 
   case HOME_KEY:
-    E.cur.x = 0;
+    E.cur.x = findn(E.nrows) + 1;
     break;
   case END_KEY:
     E.cur.x = E.ws.columns - 1;
@@ -448,10 +501,6 @@ void on_keypress_insert() {
 // taking in arguments
 int main(int argc, char *argv[]) {
   setlocale(LC_ALL, "");
-  E.mode = NORMAL;
-  E.nrows = 0;
-  E.cur.x = 0;
-  E.cur.y = 0;
   enable_raw_mode();
   init_editor();
 
