@@ -12,6 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#define TAB_STOP 2
 enum editor_key {
   ARROW_LEFT = 1000,
   BACKSPACE = 127,
@@ -202,7 +203,7 @@ int ctrx(row *r, int cx) {
   int j;
   for (j = 0; j < cx; j++) {
     if (r->chars[j] == '\t')
-      rx += (2 - 1) - (rx % 2);
+      rx += (TAB_STOP - 1) - (rx % TAB_STOP);
     rx++;
   }
   return rx;
@@ -229,7 +230,6 @@ void scroll() {
     E.rx = ctrx(&E.r[E.cur.y], E.cur.x);
   }
 
-  E.rx = E.cur.x;
   // Vertical Scrolling
   if (E.cur.y < E.rowoff) {
     E.rowoff = E.cur.y;
@@ -806,14 +806,14 @@ void update_row(row *r) {
       tabs++;
 
   free(r->render);
-  r->render = malloc(r->size + tabs * 7 + 1);
+  r->render = malloc(r->size + tabs * (TAB_STOP - 1) + 1);
 
   int idx = 0;
 
   for (j = 0; j < r->size; j++) {
     if (r->chars[j] == '\t') {
       r->render[idx++] = ' ';
-      while (idx % 2 != 0)
+      while (idx % TAB_STOP != 0)
         r->render[idx++] = ' ';
     } else {
       r->render[idx++] = r->chars[j];
