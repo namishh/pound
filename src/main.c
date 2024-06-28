@@ -2,15 +2,18 @@
 #include <errno.h>
 #include <locale.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 enum editor_key {
   ARROW_LEFT = 1000,
+  BACKSPACE = 127,
   ARROW_RIGHT,
   ARROW_UP,
   ARROW_DOWN,
@@ -47,9 +50,12 @@ struct cursor {
 struct editor_config {
   struct termios orig_termios;
   struct window_size ws;
+  char statusmsg[80];
+  time_t statusmsg_time;
   struct cursor cur;
   int rx;
   int nrows;
+  char *filename;
   int rowoff;
   int coloff;
   row *r;
@@ -170,14 +176,105 @@ void scroll() {
   }
 }
 
-void status_bar(struct buffer *b) {
-  buffer_append(b, "\x1b[100m", 6);
-  int len = 0;
+char *shorten_path(char *path) {
+  char *token = strtok(path, "/");
+  char *last_dir = NULL;
+
+  while (token != NULL) {
+    last_dir = token;
+    token = strtok(NULL, "/");
+  }
+
+  return last_dir;
+}
+
+char *get_file_extension(char *filepath) {
+  if (!filepath)
+    return " ";
+  char *dot = strrchr(filepath, '.'); // Find the last occurrence of '.'
+  if (!dot || dot == filepath)
+    return filepath; // No extension found or dot is the first character
+
+  return dot + 1; // Return the extension (skip the dot character)
+}
+
+char *get_devicon() {
+  // get extension of filename
+  // return the devicon for that extension
+  char *ext = get_file_extension(E.filename);
+  if (strcmp(ext, "c") == 0) {
+    return "\x1b[34m   \x1b[0m";
+  } else if (strcmp(ext, "Makefile") == 0) {
+    return "\x1b[32m   \x1b[0m";
+  } else {
+    return "\x1b[37m 󰈔 \x1b[0m";
+  }
+}
+
+void tab_bar(struct buffer *b) {
+  char tab[100];
+  int len = snprintf(tab, sizeof(tab), "\x1b[40m\x1b[34m   \x1b[0m %s",
+                     E.filename ? E.filename : "Pound");
+  buffer_append(b, tab, len);
   while (len < E.ws.columns) {
     buffer_append(b, " ", 1);
     len++;
   }
   buffer_append(b, "\x1b[m", 3);
+  buffer_append(b, "\r\n", 2);
+}
+
+void status_message(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
+  va_end(ap);
+  E.statusmsg_time = time(NULL);
+}
+
+void message_bar(struct buffer *b) {
+  buffer_append(b, "\x1b[K", 3);
+  int msglen = strlen(E.statusmsg);
+  if (msglen > E.ws.columns)
+    msglen = E.ws.columns;
+  if (msglen && time(NULL) - E.statusmsg_time < 5)
+    buffer_append(b, E.statusmsg, msglen);
+}
+
+void status_bar(struct buffer *b) {
+  char *normal = "\x1b[044m\x1b[30m NORMAL \x1b[0m";
+  char *normal_end = "\x1b[44m \x1b[0m";
+  if (E.mode == INSERT) {
+    normal = "\x1b[042m\x1b[30m INSERT \x1b[0m";
+    normal_end = "\x1b[42m \x1b[0m";
+  }
+  char status[160], rstatus[10];
+  char cwd[100];
+  if (getcwd(cwd, sizeof(cwd)) == NULL) {
+    strcpy(cwd, "Too large");
+  }
+  char *path = shorten_path(cwd);
+  char *devicon = get_devicon();
+  int len = snprintf(status, sizeof(status),
+                     "%s %s%.20s \x1b[30m | \x1b[39m %s \x1b[34m   \x1b[0m "
+                     "\x1b[40m %d/%d \x1b[0m%s",
+                     normal, devicon, E.filename ? E.filename : "Pound", path,
+                     E.cur.y + 1, E.nrows, normal_end);
+  int rlen = snprintf(rstatus, sizeof(rstatus), " ");
+  if (len > E.ws.columns)
+    len = E.ws.columns;
+
+  buffer_append(b, status, len);
+  while (len < E.ws.columns) {
+    if (E.ws.columns - len == rlen - 46) {
+      buffer_append(b, rstatus, rlen);
+      break;
+    } else {
+      buffer_append(b, " ", 1);
+      len++;
+    }
+  }
+  buffer_append(b, "\r\n", 2);
 }
 
 void draw_rows(struct buffer *b) {
@@ -193,7 +290,11 @@ void draw_rows(struct buffer *b) {
       }
     } else {
       char line_number[findn(E.nrows) + 1];
-      sprintf(line_number, "\x1b[30m%s\x1b[0m ",
+      char *hex = "\x1b[30m";
+      if (y + E.rowoff + 1 == E.cur.y + 1) {
+        hex = "\x1b[37m";
+      }
+      sprintf(line_number, "%s%s\x1b[0m ", hex,
               pad_with_zeros(y + E.rowoff + 1, findn(E.nrows)));
       buffer_append(b, line_number, findn(E.nrows) + 10);
       int len = E.r[filerow].rsize - E.coloff;
@@ -257,11 +358,13 @@ void refresh_screen() {
   // H -> Mouse Command
   buffer_append(&buf, "\x1b[H", 3);
 
+  tab_bar(&buf);
   draw_rows(&buf);
   status_bar(&buf);
+  message_bar(&buf);
 
   char bu[32];
-  snprintf(bu, sizeof(bu), "\x1b[%d;%dH", E.cur.y - E.rowoff + 1,
+  snprintf(bu, sizeof(bu), "\x1b[%d;%dH", E.cur.y - E.rowoff + 2,
            E.rx - E.coloff + findn(E.nrows) + 2);
   buffer_append(&buf, bu, strlen(bu));
 
@@ -377,12 +480,16 @@ void init_editor() {
   E.coloff = 0;
   E.rowoff = 0;
   E.rx = 0;
+  E.filename = NULL;
   E.cur.x = 0;
   E.cur.y = 0;
   E.r = NULL;
+  E.statusmsg[0] = '\0';
+  E.statusmsg_time = 0;
+
   if (window_size(&E.ws.rows, &E.ws.columns) == -1)
     die("window_size");
-  E.ws.rows -= 1;
+  E.ws.rows -= 3;
 }
 
 void move_cursor(int key) {
@@ -514,7 +621,27 @@ void append_row(char *s, size_t len) {
   E.nrows++;
 }
 
+void insert_char_row(row *r, int at, int c) {
+  if (at < 0 || at > r->size)
+    at = r->size;
+  r->chars = realloc(r->chars, r->size + 2);
+  memmove(&r->chars[at + 1], &r->chars[at], r->size - at + 1);
+  r->size++;
+  r->chars[at] = c;
+  update_row(r);
+}
+
+void insert_char(int c) {
+  if (E.cur.y == E.nrows) {
+    append_row("", 0);
+  }
+  insert_char_row(&E.r[E.cur.y], E.cur.x, c);
+  E.cur.x++;
+}
+
 void editor_open(char *filename) {
+  free(E.filename);
+  E.filename = filename;
   FILE *fp = fopen(filename, "r");
   if (!fp)
     die("fopen");
@@ -536,6 +663,17 @@ void editor_open(char *filename) {
 void on_keypress_insert() {
   int c = read_key();
   switch (c) {
+  // disable special keys
+  case '\r':
+    /* TODO */
+    break;
+  case BACKSPACE:
+  case CTRL_KEY('h'):
+  case DEL_KEY:
+    /* TODO */
+    break;
+  case CTRL_KEY('l'):
+
   case CTRL_KEY('q'):
     die("Exited");
     exit(0);
@@ -568,6 +706,10 @@ void on_keypress_insert() {
   case ARROW_RIGHT:
     move_cursor(c);
     break;
+
+  default:
+    insert_char(c);
+    break;
   }
 
   E.hist.prev_key = c;
@@ -582,6 +724,8 @@ int main(int argc, char *argv[]) {
   if (argc >= 2) {
     editor_open(argv[1]);
   }
+
+  status_message("HELP: Ctrl-Q = quit");
 
   while (1) {
     refresh_screen();
