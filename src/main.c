@@ -37,6 +37,8 @@ struct window_size {
 typedef struct row {
   int size;
   int rsize;
+  unsigned char *hl;
+
   char *render;
   char *chars;
 } row;
@@ -64,6 +66,8 @@ struct editor_config {
   MODE mode;
   int dirty;
 };
+
+enum editorHighlight { HL_NORMAL = 0, HL_NUMBER, HL_MATCH };
 
 struct buffer {
   char *b;
@@ -296,6 +300,17 @@ void status_bar(struct buffer *b) {
   buffer_append(b, "\r\n", 2);
 }
 
+int syntcol(int hl) {
+  switch (hl) {
+  case HL_NUMBER:
+    return 31;
+  case HL_MATCH:
+    return 44;
+  default:
+    return 37;
+  }
+}
+
 void draw_rows(struct buffer *b) {
   int y;
   for (y = 0; y < E.ws.rows; y++) {
@@ -321,7 +336,32 @@ void draw_rows(struct buffer *b) {
         len = 0;
       if (len > E.ws.columns)
         len = E.ws.columns;
-      buffer_append(b, &E.r[filerow].render[E.coloff], len);
+
+      char *c = &E.r[filerow].render[E.coloff];
+      unsigned char *hl = &E.r[filerow].hl[E.coloff];
+
+      int current_color = -1;
+
+      int j;
+      for (j = 0; j < len; j++) {
+        if (hl[j] == HL_NORMAL) {
+          if (current_color != -1) {
+            buffer_append(b, "\x1b[0m", 4);
+            current_color = -1;
+          }
+          buffer_append(b, &c[j], 1);
+        } else {
+          int color = syntcol(hl[j]);
+          if (color != current_color) {
+            current_color = color;
+            char buf[16];
+            int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+            buffer_append(b, buf, clen);
+          }
+          buffer_append(b, &c[j], 1);
+        }
+      }
+      buffer_append(b, "\x1b[0m", 4);
     }
     // clearing line by line instead of the whole screen
     buffer_append(b, "\x1b[K", 3);
@@ -493,6 +533,17 @@ int window_size(int *rows, int *cols) {
   }
 }
 
+void update_syntax(row *r) {
+  r->hl = realloc(r->hl, r->rsize);
+  memset(r->hl, HL_NORMAL, r->rsize);
+  int i;
+  for (i = 0; i < r->rsize; i++) {
+    if (isdigit(r->render[i])) {
+      r->hl[i] = HL_NUMBER;
+    }
+  }
+}
+
 void init_editor() {
   E.mode = NORMAL;
   E.nrows = 0;
@@ -615,6 +666,8 @@ void update_row(row *r) {
 
   r->render[idx] = '\0';
   r->rsize = idx;
+
+  update_syntax(r);
 }
 
 void append_row(int at, char *s, size_t len) {
@@ -631,6 +684,7 @@ void append_row(int at, char *s, size_t len) {
 
   E.r[at].rsize = 0;
   E.r[at].render = NULL;
+  E.r[at].hl = NULL;
   update_row(&E.r[at]);
 
   E.nrows++;
@@ -674,6 +728,7 @@ void row_del_char(row *r, int at) {
 void free_row(row *r) {
   free(r->render);
   free(r->chars);
+  free(r->hl);
 }
 
 void del_row(int at) {
@@ -860,6 +915,15 @@ void f_mode() {
 void search_callback(char *query, int key) {
   static int last_match = -1;
   static int direction = 1;
+
+  static int saved_hl_line;
+  static char *saved_hl = NULL;
+  if (saved_hl) {
+    memcpy(E.r[saved_hl_line].hl, saved_hl, E.r[saved_hl_line].rsize);
+    free(saved_hl);
+    saved_hl = NULL;
+  }
+
   if (key == '\r' || key == '\x1b') {
     last_match = -1;
     direction = 1;
@@ -890,6 +954,12 @@ void search_callback(char *query, int key) {
       E.cur.y = current;
       E.cur.x = rtcx(r, match - r->render);
       E.rowoff = E.nrows;
+
+      saved_hl_line = current;
+      saved_hl = malloc(r->rsize);
+      memcpy(saved_hl, r->hl, r->rsize);
+
+      memset(&r->hl[match - r->render], HL_MATCH, strlen(query));
       break;
     }
   }
