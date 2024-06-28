@@ -1,108 +1,95 @@
-#include "response.h"
-#include "../server/server.h"
-#include "../todo/todo.h"
-#include <fcntl.h>
+#include "response/response.h"
+#include "routing/routing.h"
+#include "server/server.h"
+#include "todo/todo.h"
+#include "string.h"
 #include <stdio.h>
-#include <sys/stat.h>
+#include <sys/socket.h>
 #include <unistd.h>
+void start(struct Server *server) {
+  char buffer[BUFFER_SIZE];
+  int new_socket;
+  int addrlen = sizeof(server->address);
 
-const char *get_file_extension(const char *filepath) {
-  const char *dot = strrchr(filepath, '.'); // Find the last occurrence of '.'
-  if (!dot || dot == filepath)
-    return ""; // No extension found or dot is the first character
+  add_route("/", "index.html");
+  add_route("/about", "about.html");
+  add_route("/secret", "static/text.txt");
+  add_route("/based", "based.html");
+  add_route("/todos", "todos.html");
 
-  return dot + 1; // Return the extension (skip the dot character)
-}
+  add_route("/static/200.jpg", "static/200.jpg");
+  add_route("/static/404.jpg", "static/404.jpg");
+  add_route("/static/chad.webp", "static/chad.webp");
+  add_route("/static/dance.gif", "static/dance.gif");
+  add_route("/favicon.ico", "static/favicon.ico");
 
-const char *get_mime_type(const char *file_ext) {
-  if (strcasecmp(file_ext, "html") == 0 || strcasecmp(file_ext, "htm") == 0) {
-    return "text/html";
-  } else if (strcasecmp(file_ext, "txt") == 0) {
-    return "text/plain";
-  } else if (strcasecmp(file_ext, "css") == 0) {
-    return "text/css";
-  } else if (strcasecmp(file_ext, "js") == 0) {
-    return "text/javascript";
-  } else if (strcasecmp(file_ext, "jpg") == 0 ||
-             strcasecmp(file_ext, "jpeg") == 0) {
-    return "image/jpeg";
-  } else if (strcasecmp(file_ext, "png") == 0) {
-    return "image/png";
-  } else if (strcasecmp(file_ext, "gif") == 0) {
-    return "image/gif";
-  } else if (strcasecmp(file_ext, "webp") == 0) {
-    return "image/webp";
-  } else {
-    return "application/octet-stream";
+  add_route("/static/style.css", "static/style.css");
+  add_route("/static/app.js", "static/app.js");
+  add_route("/static/todo.js", "static/todo.js");
+
+  add_route("/api", " ");
+
+  inorder();
+  while (1) {
+    printf("Waitng for connections...\n");
+    // accept() -> accepts a connection on a socket.
+    new_socket = accept(server->sock, (struct sockaddr *)&server->address,
+                        (socklen_t *)&addrlen);
+    // read() -> read from a file descriptor
+    memset(buffer, 0, BUFFER_SIZE * sizeof(char));
+    read(new_socket, buffer, BUFFER_SIZE);
+
+    printf("===========BUFFER========\n");
+    printf("%s\n", buffer);
+    printf("==========================\n");
+    struct Request request = request_constructor(buffer);
+    printf("Route: %s\n", request.URI);
+    printf("Method: %s\n", request.method);
+    printf("Body: %s\n", request.body);
+
+    print_headers();
+    char *status = "HTTP/1.1 200 OK\r\n";
+    char *file;
+    int is_json = 0;
+    struct Route *route = search(request.URI);
+    if (strstr(request.URI, "/api") != 0) {
+      file = " ";
+      is_json = 1;
+    }
+    if (route == NULL) {
+      status = "HTTP/1.1 404 NOT FOUND\r\n";
+      file = "./public/404.html";
+      printf("Route not found\n");
+    } else {
+      char filename[100];
+      snprintf(filename, 100, "./public/%s", route->value);
+      printf("Route found %s\n", filename);
+      file = strdup(filename);
+    }
+    printf("is_json: %d\n", is_json);
+    struct Response response =
+        response_constructor(file, request, status, is_json);
+
+    printf("Status: %s\n", response.status);
+    printf("Body: %s\n", response.body);
+
+    send(new_socket, response.body, response.size, 0);
+
+    // close the new_socket
+    close(new_socket);
   }
 }
 
-struct Response response_constructor(char *filename, struct Request request,
-                                     char *status, int is_json) {
-  char *header = (char *)malloc(BUFFER_SIZE * sizeof(char));
-  struct Response res;
+int main() {
+  // AF_INET -> IPv4, SOCK_STREAM -> TCP, 0 -> protocol
+  // BACKLOG -> number of connections that can be queued -> 10
+  // INADDR_ANY -> any interface
+  seed_db();
+  printf("%s\n", get_all_tasks_in_json());
+  struct Server server =
+      server_constructor(AF_INET, SOCK_STREAM, 0, PORT, 10, INADDR_ANY, start);
 
-  size_t response_len = 0;
-  if (is_json != 1) {
-    char *response = (char *)malloc(BUFFER_SIZE * sizeof(char));
-    snprintf(header, BUFFER_SIZE, "%sContent-Type:%s\r\n\r\n", status,
-             get_mime_type(get_file_extension(filename)));
+  server.start(&server);
 
-    int file_fd = open(filename, O_RDONLY);
-
-    struct stat file_stat;
-    fstat(file_fd, &file_stat);
-
-    // copy header to response buffer
-    response_len = 0;
-    memcpy(response, header, strlen(header));
-    response_len += strlen(header);
-
-    // copy file to response buffer
-    ssize_t bytes_read;
-    while ((bytes_read = read(file_fd, response + response_len,
-                              BUFFER_SIZE - response_len)) > 0) {
-      response_len += bytes_read;
-    }
-    res.body = response;
-    res.size = response_len;
-    res.status = status;
-    close(file_fd);
-  } else {
-    char *data = request.body;
-    char *method = request.method;
-    char *json = (char *)malloc(1000 * sizeof(char));
-
-    if (strcmp(method, "GET") == 0) {
-      json = get_all_tasks_in_json();
-      status = "HTTP/1.1 200 OK\r\n";
-    } else { 
-      struct Todo *todo = todo_from_json(data);
-      if (strcmp(method, "POST") == 0){
-      insert_task(*todo);
-      json = "{ \"message\": \"Task created\" }";
-      status = "HTTP/1.1 201 Created\r\n";
-    } else if (strcmp(method, "DELETE") == 0){
-      delete_task(todo->id);
-      json = "{ \"message\": \"Task deleted\" }";
-      status = "HTTP/1.1 204 No Content\r\n";
-    } else if (strcmp(method, "PUT") == 0){
-      update_task(todo->id , *todo);
-      json = "{ \"message\": \"Task updated\" }";
-      status = "HTTP/1.1 202 Accepted\r\n";
-    }
-    }
-      
-    char *response = (char *)malloc(BUFFER_SIZE * sizeof(char));
-    snprintf(header, BUFFER_SIZE,
-             "%sContent-Type: application/json\r\n\r\n%s",
-             status, json);
-    snprintf(response, BUFFER_SIZE, "%s", header);
-    res.body = response;
-    res.size = strlen(response);
-    res.status = status;
-  }
-  return res;
-  free(header);
+  return 0;
 }
-

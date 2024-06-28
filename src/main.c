@@ -1,5 +1,6 @@
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <locale.h>
 #include <math.h>
 #include <stdarg.h>
@@ -61,12 +62,16 @@ struct editor_config {
   row *r;
   struct history hist;
   MODE mode;
+  int dirty;
 };
 
 struct buffer {
   char *b;
   int len;
 };
+
+void refresh_screen();
+char *start_prompt(char *prompt);
 
 // buffer methods
 
@@ -213,14 +218,13 @@ char *get_devicon() {
 
 void tab_bar(struct buffer *b) {
   char tab[100];
-  int len = snprintf(tab, sizeof(tab), "\x1b[40m\x1b[34m   \x1b[0m %s",
-                     E.filename ? E.filename : "Pound");
+  int len = snprintf(tab, sizeof(tab), "\x1b[40m\x1b[34m   \x1b[0m %s%s",
+                     E.filename ? E.filename : "Pound", E.dirty ? "* " : " ");
   buffer_append(b, tab, len);
   while (len < E.ws.columns) {
     buffer_append(b, " ", 1);
     len++;
   }
-  buffer_append(b, "\x1b[m", 3);
   buffer_append(b, "\r\n", 2);
 }
 
@@ -480,6 +484,7 @@ void init_editor() {
   E.coloff = 0;
   E.rowoff = 0;
   E.rx = 0;
+  E.dirty = 0;
   E.filename = NULL;
   E.cur.x = 0;
   E.cur.y = 0;
@@ -490,6 +495,39 @@ void init_editor() {
   if (window_size(&E.ws.rows, &E.ws.columns) == -1)
     die("window_size");
   E.ws.rows -= 3;
+}
+
+char *start_prompt(char *prompt) {
+  size_t bufsize = 128;
+  char *buf = malloc(bufsize);
+  size_t buflen = 0;
+  buf[0] = '\0';
+
+  while (1) {
+    status_message(prompt, buf);
+    refresh_screen();
+
+    int c = read_key();
+    if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
+      if (buflen != 0)
+        buf[--buflen] = '\0';
+    } else if (c == CTRL_KEY('\x1b')) {
+      status_message("");
+      return NULL;
+    } else if (c == '\r' && buflen != 0) {
+      if (buflen != 0) {
+        status_message("");
+        return buf;
+      }
+    } else if (!iscntrl(c) && c < 128) {
+      if (buflen == bufsize - 1) {
+        bufsize *= 2;
+        buf = realloc(buf, bufsize);
+      }
+      buf[buflen++] = c;
+      buf[buflen] = '\0';
+    }
+  }
 }
 
 void move_cursor(int key) {
@@ -605,10 +643,13 @@ void update_row(row *r) {
   r->rsize = idx;
 }
 
-void append_row(char *s, size_t len) {
-  E.r = realloc(E.r, sizeof(row) * (E.nrows + 1));
+void append_row(int at, char *s, size_t len) {
 
-  int at = E.nrows;
+  if (at < 0 || at > E.nrows)
+    return;
+  E.r = realloc(E.r, sizeof(row) * (E.nrows + 1));
+  memmove(&E.r[at + 1], &E.r[at], sizeof(row) * (E.nrows - at));
+
   E.r[at].size = len;
   E.r[at].chars = malloc(len + 1);
   memcpy(E.r[at].chars, s, len);
@@ -619,6 +660,7 @@ void append_row(char *s, size_t len) {
   update_row(&E.r[at]);
 
   E.nrows++;
+  E.dirty++;
 }
 
 void insert_char_row(row *r, int at, int c) {
@@ -631,12 +673,123 @@ void insert_char_row(row *r, int at, int c) {
   update_row(r);
 }
 
+void insert_new_line() {
+  if (E.cur.x == 0) {
+    append_row(E.cur.y, "", 0);
+  } else {
+    row *r = &E.r[E.cur.y];
+    append_row(E.cur.y + 1, &r->chars[E.cur.x], r->size - E.cur.x);
+    r = &E.r[E.cur.y];
+    r->size = E.cur.x;
+    r->chars[r->size] = '\0';
+    update_row(r);
+  }
+  E.cur.y++;
+  E.cur.x = 0;
+}
+
+void row_del_char(row *r, int at) {
+  if (at < 0 || at >= r->size)
+    return;
+  memmove(&r->chars[at], &r->chars[at + 1], r->size - at);
+  r->size--;
+  update_row(r);
+  E.dirty++;
+}
+
+void free_row(row *r) {
+  free(r->render);
+  free(r->chars);
+}
+
+void del_row(int at) {
+  if (at < 0 || at >= E.nrows)
+    return;
+  free_row(&E.r[at]);
+  memmove(&E.r[at], &E.r[at + 1], sizeof(row) * (E.nrows - at - 1));
+  E.nrows--;
+  E.dirty++;
+}
+
 void insert_char(int c) {
   if (E.cur.y == E.nrows) {
-    append_row("", 0);
+    append_row(E.nrows, "", 0);
   }
   insert_char_row(&E.r[E.cur.y], E.cur.x, c);
   E.cur.x++;
+  E.dirty++;
+}
+
+void append_string(row *r, char *s, size_t len) {
+  r->chars = realloc(r->chars, r->size + len + 1);
+  memcpy(&r->chars[r->size], s, len);
+  r->size += len;
+  r->chars[r->size] = '\0';
+  update_row(r);
+  E.dirty++;
+}
+
+void del_char() {
+  if (E.cur.y == E.nrows)
+    return;
+  if (E.cur.x == 0 && E.cur.y == 0)
+    return;
+  row *r = &E.r[E.cur.y];
+  if (E.cur.x > 0) {
+    row_del_char(r, E.cur.x - 1);
+    E.cur.x--;
+  } else {
+    E.cur.x = E.r[E.cur.y - 1].size;
+    append_string(&E.r[E.cur.y - 1], r->chars, r->size);
+    del_row(E.cur.y);
+    E.cur.y--;
+  }
+}
+
+char *rts(int *buflen) {
+  int totlen = 0;
+  int j;
+  for (j = 0; j < E.nrows; j++)
+    totlen += E.r[j].size + 1;
+  *buflen = totlen;
+  char *buf = malloc(totlen);
+  char *p = buf;
+  for (j = 0; j < E.nrows; j++) {
+    memcpy(p, E.r[j].chars, E.r[j].size);
+    p += E.r[j].size;
+    *p = '\n';
+    p++;
+  }
+  return buf;
+}
+
+void save() {
+  if (E.filename == NULL) {
+
+    E.filename = start_prompt("Save as: %s");
+    if (E.filename == NULL) {
+      status_message("Save aborted");
+      return;
+    }
+  }
+  int len;
+  char *buf = rts(&len);
+  int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
+
+  if (fd != -1) {
+    if (ftruncate(fd, len) != -1) {
+      if (write(fd, buf, len) == len) {
+        close(fd);
+        free(buf);
+        E.dirty = 0;
+        status_message("%d bytes written to disk", len);
+        return;
+      }
+    }
+    close(fd);
+  }
+  free(buf);
+  status_message("Can't save! I/O error: %s", strerror(errno));
 }
 
 void editor_open(char *filename) {
@@ -648,14 +801,23 @@ void editor_open(char *filename) {
   char *line = NULL;
   size_t linecap = 0;
   ssize_t linelen;
+
   linelen = getline(&line, &linecap, fp);
+  if (linelen != -1) {
+    while (linelen > 0 &&
+           (line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
+      linelen--;
+    append_row(E.nrows, line, linelen);
+  }
+
   while ((linelen = getline(&line, &linecap, fp)) != -1) {
     while (linelen > 0 &&
            (line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
       linelen--;
-    append_row(line, linelen);
+    append_row(E.nrows, line, linelen);
   }
   E.cur.x = findn(E.nrows) + 1;
+  E.dirty = 0;
   free(line);
   fclose(fp);
 }
@@ -665,18 +827,23 @@ void on_keypress_insert() {
   switch (c) {
   // disable special keys
   case '\r':
-    /* TODO */
+    insert_new_line();
     break;
   case BACKSPACE:
   case CTRL_KEY('h'):
   case DEL_KEY:
-    /* TODO */
+    del_char();
     break;
   case CTRL_KEY('l'):
+    break;
 
   case CTRL_KEY('q'):
     die("Exited");
     exit(0);
+    break;
+
+  case CTRL_KEY('s'):
+    save();
     break;
 
   // escape key
