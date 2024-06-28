@@ -50,6 +50,17 @@ struct cursor {
   int y;
 };
 
+#define HL_HIGHLIGHT_NUMBERS (1 << 0)
+#define HL_HIGHLIGHT_STRINGS (1 << 1)
+
+struct syntax {
+  char *filetype;
+  char **filematch;
+  char **keywords;
+  char *singleline_comment_start;
+  int flags;
+};
+
 struct editor_config {
   struct termios orig_termios;
   struct window_size ws;
@@ -65,9 +76,43 @@ struct editor_config {
   struct history hist;
   MODE mode;
   int dirty;
+  struct syntax *syntax;
 };
 
-enum editorHighlight { HL_NORMAL = 0, HL_NUMBER, HL_MATCH };
+enum editorHighlight {
+  HL_NORMAL = 0,
+  HL_NUMBER,
+  HL_MATCH,
+  HL_STRING,
+  HL_COMMENT,
+  HL_KEYWORD1,
+  HL_KEYWORD2,
+
+};
+
+char *C_HL_extensions[] = {".c", ".h", ".cpp", NULL};
+
+char *C_HL_keywords[] = {"switch", "if",        "#include", "while",   "for",
+                         "break",  "continue",  "return",   "else",    "struct",
+                         "union",  "typedef",   "static",   "enum",    "class",
+                         "case",   "int|",      "long|",    "double|", "float|",
+                         "char|",  "unsigned|", "signed|",  "void|",   NULL};
+
+char *Py_HL_keywords[] = {"print",       "if",     "elif",   "else", "for",
+                          "while",       "def",    "class",  "in",   "range",
+                          "self",        "float|", "str|",   "int|", "list|",
+                          "dictionary|", "set|",   "return", "do",   NULL};
+
+char *Py_HL_extensions[] = {".py", NULL};
+
+struct syntax HLDB[] = {
+    {"c", C_HL_extensions, C_HL_keywords, "//",
+     HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
+    {"py", Py_HL_extensions, Py_HL_keywords, "#",
+     HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
+};
+
+#define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
 
 struct buffer {
   char *b;
@@ -77,6 +122,7 @@ struct buffer {
 void refresh_screen();
 char *start_prompt(char *prompt, void (*callback)(char *, int));
 void del_row(int at);
+void update_syntax(row *r);
 
 // buffer methods
 
@@ -303,11 +349,44 @@ void status_bar(struct buffer *b) {
 int syntcol(int hl) {
   switch (hl) {
   case HL_NUMBER:
-    return 31;
+    return 33;
+  case HL_STRING:
+    return 32;
+  case HL_KEYWORD1:
+    return 35;
+  case HL_KEYWORD2:
+    return 36;
   case HL_MATCH:
     return 44;
+  case HL_COMMENT:
+    return 30;
   default:
     return 37;
+  }
+}
+
+void detect() {
+  E.syntax = NULL;
+  if (E.filename == NULL)
+    return;
+  char *ext = strrchr(E.filename, '.');
+  for (unsigned int j = 0; j < HLDB_ENTRIES; j++) {
+    struct syntax *s = &HLDB[j];
+    unsigned int i = 0;
+    while (s->filematch[i]) {
+      int is_ext = (s->filematch[i][0] == '.');
+      if ((is_ext && ext && !strcmp(ext, s->filematch[i])) ||
+          (!is_ext && strstr(E.filename, s->filematch[i]))) {
+        E.syntax = s;
+        int filerow;
+        for (filerow = 0; filerow < E.nrows; filerow++) {
+          update_syntax(&E.r[filerow]);
+        }
+
+        return;
+      }
+      i++;
+    }
   }
 }
 
@@ -533,14 +612,91 @@ int window_size(int *rows, int *cols) {
   }
 }
 
+int is_separator(int c) {
+  return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
+}
+
 void update_syntax(row *r) {
   r->hl = realloc(r->hl, r->rsize);
   memset(r->hl, HL_NORMAL, r->rsize);
-  int i;
-  for (i = 0; i < r->rsize; i++) {
-    if (isdigit(r->render[i])) {
-      r->hl[i] = HL_NUMBER;
+
+  if (E.syntax == NULL)
+    return;
+
+  char **keywords = E.syntax->keywords;
+  char *scs = E.syntax->singleline_comment_start;
+  int scs_len = scs ? strlen(scs) : 0;
+
+  int prev_sep = 1;
+  int in_string = 0;
+
+  int i = 0;
+  while (i < r->rsize) {
+    char c = r->render[i];
+    unsigned char prev_hl = (i > 0) ? r->hl[i - 1] : HL_NORMAL;
+
+    if (scs_len && !in_string) {
+      if (!strncmp(&r->render[i], scs, scs_len)) {
+        memset(&r->hl[i], HL_COMMENT, r->rsize - i);
+        break;
+      }
     }
+
+    if (E.syntax->flags & HL_HIGHLIGHT_STRINGS) {
+      if (in_string) {
+        r->hl[i] = HL_STRING;
+        if (c == '\\' && i + 1 < r->rsize) {
+          r->hl[i + 1] = HL_STRING;
+          i += 2;
+          continue;
+        }
+        if (c == in_string)
+          in_string = 0;
+        i++;
+        prev_sep = 1;
+        continue;
+      } else {
+        if (c == '"' || c == '\'' || c == '\'') {
+          in_string = c;
+          r->hl[i] = HL_STRING;
+          i++;
+          continue;
+        }
+      }
+    }
+    if (E.syntax->flags & HL_HIGHLIGHT_NUMBERS) {
+
+      if ((isdigit(c) && (prev_sep || prev_hl == HL_NUMBER)) ||
+          (c == '.' && prev_hl == HL_NUMBER)) {
+        r->hl[i] = HL_NUMBER;
+        i++;
+        prev_sep = 0;
+        continue;
+      }
+    }
+
+    if (prev_sep) {
+      int j;
+      for (j = 0; keywords[j]; j++) {
+        int klen = strlen(keywords[j]);
+        int kw2 = keywords[j][klen - 1] == '|';
+        if (kw2)
+          klen--;
+        if (!strncmp(&r->render[i], keywords[j], klen) &&
+            is_separator(r->render[i + klen])) {
+          memset(&r->hl[i], kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
+          i += klen;
+          break;
+        }
+      }
+      if (keywords[j] != NULL) {
+        prev_sep = 0;
+        continue;
+      }
+    }
+
+    prev_sep = is_separator(c);
+    i++;
   }
 }
 
@@ -557,7 +713,7 @@ void init_editor() {
   E.r = NULL;
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
-
+  E.syntax = NULL;
   if (window_size(&E.ws.rows, &E.ws.columns) == -1)
     die("window_size");
   E.ws.rows -= 3;
@@ -800,6 +956,7 @@ void save() {
       status_message("Save aborted");
       return;
     }
+    detect();
   }
   int len;
   char *buf = rts(&len);
@@ -824,6 +981,7 @@ void save() {
 void editor_open(char *filename) {
   free(E.filename);
   E.filename = filename;
+  detect();
   FILE *fp = fopen(filename, "r");
   if (!fp)
     die("fopen");
@@ -1039,9 +1197,7 @@ void on_keypress_normal() {
     E.cur.y = E.nrows;
     break;
   case 'g':
-    if (E.hist.prev_key == 'g') {
-      E.cur.y = 0;
-    }
+    E.cur.y = 0;
     break;
   case 'o':
     append_row(E.cur.y + 1, "", 0);
@@ -1130,6 +1286,42 @@ void on_keypress_insert() {
   case ARROW_LEFT:
   case ARROW_RIGHT:
     move_cursor(c);
+    break;
+
+  case '{':
+    insert_char(c);
+    insert_char('}');
+    E.cur.x--;
+    break;
+
+  case '<':
+    insert_char(c);
+    insert_char('>');
+    E.cur.x--;
+    break;
+
+  case '[':
+    insert_char(c);
+    insert_char(']');
+    E.cur.x--;
+    break;
+
+  case '(':
+    insert_char(c);
+    insert_char(')');
+    E.cur.x--;
+    break;
+
+  case '\'':
+    insert_char(c);
+    insert_char('\'');
+    E.cur.x--;
+    break;
+
+  case '"':
+    insert_char(c);
+    insert_char('"');
+    E.cur.x--;
     break;
 
   default:

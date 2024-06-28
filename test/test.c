@@ -29,7 +29,6 @@ void start(struct Server *server) {
   add_route("/static/todo.js", "static/todo.js");
 
   add_route("/api", " ");
-
   inorder();
   while (1) {
     printf("Waitng for connections...\n");
@@ -39,7 +38,6 @@ void start(struct Server *server) {
     // read() -> read from a file descriptor
     memset(buffer, 0, BUFFER_SIZE * sizeof(char));
     read(new_socket, buffer, BUFFER_SIZE);
-
     printf("===========BUFFER========\n");
     printf("%s\n", buffer);
     printf("==========================\n");
