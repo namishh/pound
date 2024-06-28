@@ -71,7 +71,7 @@ struct buffer {
 };
 
 void refresh_screen();
-char *start_prompt(char *prompt);
+char *start_prompt(char *prompt, void (*callback)(char *, int));
 void del_row(int at);
 
 // buffer methods
@@ -156,6 +156,20 @@ int ctrx(row *r, int cx) {
     rx++;
   }
   return rx;
+}
+
+int rtcx(row *r, int rx) {
+  int currx = 0;
+  int cx;
+  for (cx = 0; cx < r->size; cx++) {
+    if (r->chars[cx] == '\t') {
+      currx += (2 - 1) - (currx % 2);
+    }
+    currx++;
+    if (currx > rx)
+      break;
+  }
+  return cx;
 }
 
 void scroll() {
@@ -498,7 +512,7 @@ void init_editor() {
   E.ws.rows -= 3;
 }
 
-char *start_prompt(char *prompt) {
+char *start_prompt(char *prompt, void (*callback)(char *, int)) {
   size_t bufsize = 128;
   char *buf = malloc(bufsize);
   size_t buflen = 0;
@@ -512,12 +526,17 @@ char *start_prompt(char *prompt) {
     if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
       if (buflen != 0)
         buf[--buflen] = '\0';
-    } else if (c == CTRL_KEY('\x1b')) {
+    } else if (c == '\x1b') {
       status_message("");
+      if (callback)
+        callback(buf, c);
+      free(buf);
       return NULL;
     } else if (c == '\r' && buflen != 0) {
       if (buflen != 0) {
         status_message("");
+        if (callback)
+          callback(buf, c);
         return buf;
       }
     } else if (!iscntrl(c) && c < 128) {
@@ -528,6 +547,8 @@ char *start_prompt(char *prompt) {
       buf[buflen++] = c;
       buf[buflen] = '\0';
     }
+    if (callback)
+      callback(buf, c);
   }
 }
 
@@ -719,7 +740,7 @@ char *rts(int *buflen) {
 void save() {
   if (E.filename == NULL) {
 
-    E.filename = start_prompt("Save as: %s");
+    E.filename = start_prompt("Save as: %s", NULL);
     if (E.filename == NULL) {
       status_message("Save aborted");
       return;
@@ -789,7 +810,7 @@ void normal_d() {
 }
 
 void vim_prompt() {
-  char *cmd = start_prompt(":%s");
+  char *cmd = start_prompt(":%s", NULL);
   if (cmd == NULL) {
     status_message("Command aborted");
     return;
@@ -836,6 +857,62 @@ void f_mode() {
   }
 }
 
+void search_callback(char *query, int key) {
+  static int last_match = -1;
+  static int direction = 1;
+  if (key == '\r' || key == '\x1b') {
+    last_match = -1;
+    direction = 1;
+    return;
+  } else if (key == CTRL_KEY('B')) {
+    direction = 1;
+  } else if (key == CTRL_KEY('N')) {
+    direction = -1;
+  } else {
+    last_match = -1;
+    direction = 1;
+  }
+  if (last_match == -1)
+    direction = 1;
+  int current = last_match;
+  int i;
+  for (i = 0; i < E.nrows; i++) {
+    current += direction;
+    if (current == -1)
+      current = E.nrows - 1;
+    else if (current == E.nrows)
+      current = 0;
+
+    row *r = &E.r[current];
+    char *match = strstr(r->render, query);
+    if (match) {
+      last_match = current;
+      E.cur.y = current;
+      E.cur.x = rtcx(r, match - r->render);
+      E.rowoff = E.nrows;
+      break;
+    }
+  }
+}
+
+void search() {
+  int saved_cx = E.cur.x;
+  int saved_cy = E.cur.y;
+  int saved_coloff = E.coloff;
+  int saved_rowoff = E.rowoff;
+
+  char *query = start_prompt("/%s", search_callback);
+
+  if (query) {
+    free(query);
+  } else {
+    E.cur.x = saved_cx;
+    E.cur.y = saved_cy;
+    E.coloff = saved_coloff;
+    E.rowoff = saved_rowoff;
+  }
+}
+
 void on_keypress_normal() {
   int c = read_key();
   switch (c) {
@@ -862,6 +939,10 @@ void on_keypress_normal() {
     break;
   case 'l':
     move_cursor(ARROW_RIGHT);
+    break;
+
+  case '/':
+    search();
     break;
 
   case 'a':
@@ -913,6 +994,11 @@ void on_keypress_normal() {
       E.cur.y++;
     break;
 
+  case 'x':
+    move_cursor(ARROW_RIGHT);
+    del_char();
+    break;
+
   case ':':
     vim_prompt();
     break;
@@ -939,7 +1025,7 @@ void on_keypress_insert() {
   case CTRL_KEY('l'):
     break;
 
-  case CTRL_KEY('q'):
+  case CTRL_KEY('x'):
     die("Exited");
     exit(0);
     break;
@@ -994,7 +1080,7 @@ int main(int argc, char *argv[]) {
     editor_open(argv[1]);
   }
 
-  status_message("HELP: Ctrl-Q = quit");
+  status_message("HELP: :q = quit");
 
   while (1) {
     refresh_screen();
