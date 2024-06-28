@@ -72,6 +72,7 @@ struct buffer {
 
 void refresh_screen();
 char *start_prompt(char *prompt);
+void del_row(int at);
 
 // buffer methods
 
@@ -569,54 +570,6 @@ void move_cursor(int key) {
   }
 }
 
-void on_keypress_normal() {
-  int c = read_key();
-  switch (c) {
-  case CTRL_KEY('q'):
-    die("Exit Pound");
-    exit(0);
-    break;
-
-  case 'i':
-    E.mode = INSERT;
-    break;
-
-  case 'h':
-    move_cursor(ARROW_LEFT);
-    break;
-  case 'j':
-    move_cursor(ARROW_DOWN);
-    break;
-  case 'k':
-    move_cursor(ARROW_UP);
-    break;
-  case 'l':
-    move_cursor(ARROW_RIGHT);
-    break;
-
-  case '0':
-    if (E.cur.y < E.nrows)
-      E.cur.x = E.r[E.cur.y].size;
-    break;
-
-  case '$':
-    if (E.cur.y < E.nrows)
-      E.cur.x = E.r[E.cur.y].size;
-    break;
-
-  case 'G':
-    E.cur.y = E.nrows;
-    break;
-  case 'g':
-    if (E.hist.prev_key == 'g') {
-      E.cur.y = 0;
-    }
-    break;
-  }
-
-  E.hist.prev_key = c;
-}
-
 void update_row(row *r) {
   int tabs = 0;
   int j;
@@ -822,6 +775,155 @@ void editor_open(char *filename) {
   fclose(fp);
 }
 
+void normal_d() {
+  int c = read_key();
+  switch (c) {
+  case 'd':
+    del_row(E.cur.y);
+    status_message("");
+    break;
+  default:
+    status_message("%c is undefined", c);
+    break;
+  }
+}
+
+void vim_prompt() {
+  char *cmd = start_prompt(":%s");
+  if (cmd == NULL) {
+    status_message("Command aborted");
+    return;
+  }
+  // check if cmd is a number
+  if (isdigit(cmd[0])) {
+    int line = atoi(cmd);
+    if (line > 0 && line <= E.nrows) {
+      E.cur.y = line - 1;
+    } else {
+      status_message("Invalid line number");
+    }
+  } else if (strcmp(cmd, "w") == 0) {
+    save();
+  } else if (strcmp(cmd, "q") == 0) {
+    if (E.dirty) {
+      status_message("No write since last change (add ! to override)");
+    } else {
+      die("Exit Pound");
+      exit(0);
+    }
+  } else if (strcmp(cmd, "w") == 0) {
+    save();
+  } else if (strcmp(cmd, "q!") == 0) {
+    die("Exit Pound");
+    exit(0);
+  } else if (strcmp(cmd, "wq") == 0 || strcmp(cmd, "x") == 0) {
+    save();
+    die("Exit Pound");
+    exit(0);
+  } else {
+    status_message("Command not found: %s", cmd);
+  }
+}
+
+void f_mode() {
+  int c = read_key();
+  // jump to the next occurence of the character
+  for (int i = E.cur.x; i < E.r[E.cur.y].size; i++) {
+    if (E.r[E.cur.y].chars[i] == c) {
+      E.cur.x = i;
+      break;
+    }
+  }
+}
+
+void on_keypress_normal() {
+  int c = read_key();
+  switch (c) {
+  case CTRL_KEY('x'):
+    die("Exit Pound");
+    exit(0);
+    break;
+
+  case 'f':
+    f_mode();
+    break;
+  case 'i':
+    E.mode = INSERT;
+    break;
+
+  case 'h':
+    move_cursor(ARROW_LEFT);
+    break;
+  case 'j':
+    move_cursor(ARROW_DOWN);
+    break;
+  case 'k':
+    move_cursor(ARROW_UP);
+    break;
+  case 'l':
+    move_cursor(ARROW_RIGHT);
+    break;
+
+  case 'a':
+    E.cur.x++;
+    E.mode = INSERT;
+    break;
+  case 'A':
+    if (E.cur.y < E.nrows)
+      E.cur.x = E.r[E.cur.y].size; // move to end of the line
+    E.mode = INSERT;
+    break;
+
+  case '0':
+    if (E.cur.y < E.nrows)
+      E.cur.x = E.r[E.cur.y].size;
+    break;
+
+  case '$':
+    if (E.cur.y < E.nrows)
+      E.cur.x = E.r[E.cur.y].size;
+    break;
+
+  case 'G':
+    E.cur.y = E.nrows;
+    break;
+  case 'g':
+    if (E.hist.prev_key == 'g') {
+      E.cur.y = 0;
+    }
+    break;
+  case 'o':
+    append_row(E.cur.y + 1, "", 0);
+    E.cur.y++;
+    E.cur.x = 0;
+    E.mode = INSERT;
+    break;
+
+  case '{':
+    while (E.cur.y > 0 && E.r[E.cur.y].size == 0)
+      E.cur.y--;
+    while (E.cur.y > 0 && E.r[E.cur.y].size > 0)
+      E.cur.y--;
+    break;
+
+  case '}':
+    while (E.cur.y < E.nrows && E.r[E.cur.y].size == 0)
+      E.cur.y++;
+    while (E.cur.y < E.nrows && E.r[E.cur.y].size > 0)
+      E.cur.y++;
+    break;
+
+  case ':':
+    vim_prompt();
+    break;
+
+  case 'd':
+    normal_d();
+    break;
+
+    E.hist.prev_key = c;
+  }
+}
 void on_keypress_insert() {
   int c = read_key();
   switch (c) {
