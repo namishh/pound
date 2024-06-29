@@ -3,3 +3,4 @@ valgrind.log
 valgrind.log.*
 cmd
 *.db
+test.c

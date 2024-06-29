@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #define TAB_STOP 2
+
 enum editor_key {
   ARROW_LEFT = 1000,
   BACKSPACE = 127,
@@ -47,11 +48,16 @@ typedef struct row {
   char *chars;
 } row;
 
-typedef enum { NORMAL, INSERT } MODE;
+typedef enum { NORMAL, INSERT, VISUAL } MODE;
 
 struct cursor {
   int x;
   int y;
+};
+
+struct select {
+  struct cursor initial;
+  struct cursor final;
 };
 
 #define HL_HIGHLIGHT_NUMBERS (1 << 0)
@@ -77,6 +83,7 @@ struct editor_config {
   int nrows;
   char *filename;
   int rowoff;
+  struct select *select;
   int coloff;
   row *r;
   struct history hist;
@@ -322,6 +329,9 @@ void status_bar(struct buffer *b) {
   if (E.mode == INSERT) {
     normal = "\x1b[042m\x1b[30m INSERT \x1b[0m";
     normal_end = "\x1b[42m \x1b[0m";
+  } else if (E.mode == VISUAL) {
+    normal = "\x1b[043m\x1b[30m VISUAL \x1b[0m";
+    normal_end = "\x1b[43m \x1b[0m";
   }
   char status[160], rstatus[10];
   char cwd[100];
@@ -430,7 +440,25 @@ void draw_rows(struct buffer *b) {
       int current_color = -1;
 
       int j;
+      int end_x;
+      int start_x;
+      struct cursor start = E.select->initial.y < E.select->final.y
+                                ? E.select->initial
+                                : E.select->final;
+      struct cursor end = E.select->initial.y < E.select->final.y
+                              ? E.select->final
+                              : E.select->initial;
       for (j = 0; j < len; j++) {
+        if (E.mode == VISUAL && filerow >= start.y && filerow <= end.y) {
+          start_x = (filerow == E.select->initial.y) ? E.select->initial.x : 0;
+          end_x = (filerow == E.select->final.y) ? E.select->final.x
+                                                 : E.r[filerow].size;
+
+          if (j >= start_x && j < end_x) {
+            // Apply inverse video highlight
+            buffer_append(b, "\x1b[7m", 4);
+          }
+        }
         if (iscntrl(c[j])) {
           char sym = (c[j] <= 26) ? '@' + c[j] : '?';
           buffer_append(b, "\x1b[7m", 4);
@@ -456,6 +484,12 @@ void draw_rows(struct buffer *b) {
             buffer_append(b, buf, clen);
           }
           buffer_append(b, &c[j], 1);
+        }
+
+        if (E.mode == VISUAL && filerow >= start.y && filerow <= end.y) {
+          if (j == end_x - 1) {
+            buffer_append(b, "\x1b[0m", 4);
+          }
         }
       }
       buffer_append(b, "\x1b[0m", 4);
@@ -763,6 +797,9 @@ void init_editor() {
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
   E.syntax = NULL;
+
+  E.select = malloc(sizeof(struct select));
+
   if (window_size(&E.ws.rows, &E.ws.columns) == -1)
     die("window_size");
   E.ws.rows -= 3;
@@ -927,11 +964,17 @@ void insert_new_line() {
     if (E.cur.y > 0) {
       row *prev_row = &E.r[E.cur.y - 1];
       int indent = 0;
-      while (indent < prev_row->size && prev_row->chars[indent] == ' ') {
-        insert_char_row(&E.r[E.cur.y], indent, ' ');
-        indent++;
+      while (indent < prev_row->size && (prev_row->chars[indent] == ' ' ||
+                                         prev_row->chars[indent] == '\t')) {
+        if (prev_row->chars[indent] == '\t') {
+          insert_char_row(&E.r[E.cur.y], indent, '\t');
+          indent++;
+        } else {
+          insert_char_row(&E.r[E.cur.y], indent, ' ');
+          indent++;
+        }
+        E.cur.x = indent;
       }
-      E.cur.x = indent;
     }
   }
 }
@@ -1241,6 +1284,13 @@ void on_keypress_normal() {
     E.cur.x++;
     E.mode = INSERT;
     break;
+
+  case 'v':
+    E.mode = VISUAL;
+    E.select->initial = E.cur;
+    E.select->final = E.cur;
+    break;
+
   case 'A':
     if (E.cur.y < E.nrows)
       E.cur.x = E.r[E.cur.y].size; // move to end of the line
@@ -1396,6 +1446,40 @@ void on_keypress_insert() {
   E.hist.prev_key = c;
 }
 
+void on_keypress_visual() {
+
+  int c = read_key();
+  switch (c) {
+  case '\x1b':
+    E.mode = NORMAL;
+    break;
+  case 'h':
+    move_cursor(ARROW_LEFT);
+    E.select->final = E.cur;
+    break;
+  case 'j':
+    move_cursor(ARROW_DOWN);
+    E.select->final = E.cur;
+    break;
+  case 'k':
+    move_cursor(ARROW_UP);
+    E.select->final = E.cur;
+    break;
+  case 'l':
+    move_cursor(ARROW_RIGHT);
+    E.select->final = E.cur;
+    break;
+  case 'G':
+    E.cur.y = E.nrows;
+    E.select->final = E.cur;
+    break;
+  case 'g':
+    E.cur.y = 0;
+    E.select->final = E.cur;
+    break;
+  }
+}
+
 // taking in arguments
 int main(int argc, char *argv[]) {
   setlocale(LC_ALL, "");
@@ -1414,6 +1498,8 @@ int main(int argc, char *argv[]) {
       on_keypress_normal();
     else if (E.mode == INSERT)
       on_keypress_insert();
+    else if (E.mode == VISUAL)
+      on_keypress_visual();
   }
 
   return 0;
