@@ -6,7 +6,9 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
+/*
+multiline comment bitch
+*/
 void start(struct Server *server) {
   char buffer[BUFFER_SIZE];
   int new_socket;

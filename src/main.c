@@ -36,9 +36,12 @@ struct window_size {
 };
 
 typedef struct row {
+  int idx;
+
   int size;
   int rsize;
   unsigned char *hl;
+  int hl_open_comment;
 
   char *render;
   char *chars;
@@ -59,6 +62,8 @@ struct syntax {
   char **filematch;
   char **keywords;
   char *singleline_comment_start;
+  char *multiline_comment_start;
+  char *multiline_comment_end;
   int flags;
 };
 
@@ -86,6 +91,7 @@ enum editorHighlight {
   HL_MATCH,
   HL_STRING,
   HL_COMMENT,
+  HL_MLCOMMENT,
   HL_KEYWORD1,
   HL_KEYWORD2,
 
@@ -107,9 +113,9 @@ char *Py_HL_keywords[] = {"print",       "if",     "elif",   "else", "for",
 char *Py_HL_extensions[] = {".py", NULL};
 
 struct syntax HLDB[] = {
-    {"c", C_HL_extensions, C_HL_keywords, "//",
+    {"c", C_HL_extensions, C_HL_keywords, "//", "/*", "*/",
      HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
-    {"py", Py_HL_extensions, Py_HL_keywords, "#",
+    {"py", Py_HL_extensions, Py_HL_keywords, "#", "\"\"\"", "\"\"\"",
      HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
 };
 
@@ -360,6 +366,8 @@ int syntcol(int hl) {
     return 44;
   case HL_COMMENT:
     return 30;
+  case HL_MLCOMMENT:
+    return 30;
   default:
     return 37;
   }
@@ -423,7 +431,17 @@ void draw_rows(struct buffer *b) {
 
       int j;
       for (j = 0; j < len; j++) {
-        if (hl[j] == HL_NORMAL) {
+        if (iscntrl(c[j])) {
+          char sym = (c[j] <= 26) ? '@' + c[j] : '?';
+          buffer_append(b, "\x1b[7m", 4);
+          buffer_append(b, &sym, 1);
+          buffer_append(b, "\x1b[m", 3);
+          if (current_color != -1) {
+            char buf[16];
+            int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", current_color);
+            buffer_append(b, buf, clen);
+          }
+        } else if (hl[j] == HL_NORMAL) {
           if (current_color != -1) {
             buffer_append(b, "\x1b[0m", 4);
             current_color = -1;
@@ -625,20 +643,47 @@ void update_syntax(row *r) {
 
   char **keywords = E.syntax->keywords;
   char *scs = E.syntax->singleline_comment_start;
+  char *mcs = E.syntax->multiline_comment_start;
+  char *mce = E.syntax->multiline_comment_end;
+
   int scs_len = scs ? strlen(scs) : 0;
+  int mcs_len = mcs ? strlen(mcs) : 0;
+  int mce_len = mce ? strlen(mce) : 0;
 
   int prev_sep = 1;
   int in_string = 0;
+  int in_comment = (r->idx > 0 && E.r[r->idx - 1].hl_open_comment);
 
   int i = 0;
   while (i < r->rsize) {
     char c = r->render[i];
     unsigned char prev_hl = (i > 0) ? r->hl[i - 1] : HL_NORMAL;
 
-    if (scs_len && !in_string) {
+    if (scs_len && !in_string && !in_comment) {
       if (!strncmp(&r->render[i], scs, scs_len)) {
         memset(&r->hl[i], HL_COMMENT, r->rsize - i);
         break;
+      }
+    }
+
+    if (mcs_len && mce_len && !in_string) {
+      if (in_comment) {
+        r->hl[i] = HL_MLCOMMENT;
+        if (!strncmp(&r->render[i], mce, mce_len)) {
+          memset(&r->hl[i], HL_MLCOMMENT, mce_len);
+          i += mce_len;
+          in_comment = 0;
+          prev_sep = 1;
+          continue;
+        } else {
+          i++;
+          continue;
+        }
+      } else if (!strncmp(&r->render[i], mcs, mcs_len)) {
+        memset(&r->hl[i], HL_MLCOMMENT, mcs_len);
+        i += mcs_len;
+        in_comment = 1;
+        continue;
       }
     }
 
@@ -698,6 +743,10 @@ void update_syntax(row *r) {
     prev_sep = is_separator(c);
     i++;
   }
+  int changed = (r->hl_open_comment != in_comment);
+  r->hl_open_comment = in_comment;
+  if (changed && r->idx + 1 < E.nrows)
+    update_syntax(&E.r[r->idx + 1]);
 }
 
 void init_editor() {
@@ -832,6 +881,10 @@ void append_row(int at, char *s, size_t len) {
     return;
   E.r = realloc(E.r, sizeof(row) * (E.nrows + 1));
   memmove(&E.r[at + 1], &E.r[at], sizeof(row) * (E.nrows - at));
+  for (int j = at + 1; j <= E.nrows; j++)
+    E.r[j].idx++;
+
+  E.r[at].idx = at;
 
   E.r[at].size = len;
   E.r[at].chars = malloc(len + 1);
@@ -841,6 +894,7 @@ void append_row(int at, char *s, size_t len) {
   E.r[at].rsize = 0;
   E.r[at].render = NULL;
   E.r[at].hl = NULL;
+  E.r[at].hl_open_comment = 0;
   update_row(&E.r[at]);
 
   E.nrows++;
