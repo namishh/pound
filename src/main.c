@@ -2,6 +2,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libclipboard.h>
 #include <locale.h>
 #include <math.h>
 #include <stdarg.h>
@@ -92,7 +93,6 @@ struct editor_config {
   MODE mode;
   int dirty;
   struct syntax *syntax;
-  struct editor_config *next;
 };
 
 enum editorHighlight {
@@ -452,6 +452,14 @@ void draw_rows(struct buffer *b) {
       struct cursor end = E.select->initial.y < E.select->final.y
                               ? E.select->final
                               : E.select->initial;
+
+      if (start.x == end.x) {
+
+        start = E.select->initial.x < E.select->final.x ? E.select->initial
+                                                        : E.select->final;
+        end = E.select->initial.x < E.select->final.x ? E.select->final
+                                                      : E.select->initial;
+      }
       for (j = 0; j < len; j++) {
         if (E.mode == VISUAL && filerow >= start.y && filerow <= end.y) {
           start_x = (filerow == E.select->initial.y) ? E.select->initial.x : 0;
@@ -506,10 +514,19 @@ void draw_rows(struct buffer *b) {
   }
 }
 
-void delete_selection() {
-  // char *deleted_text = malloc(2000); // bad practive but i dont care
-  // deleted_text[0] = '\0';
+void paste_clipboard(clipboard_c *cb) {
+  char *text = clipboard_text(cb);
+  if (text == NULL)
+    return;
+  int i = 0;
+  while (text[i] != '\0') {
+    insert_char(text[i]);
+    i++;
+  }
+  free(text);
+}
 
+void delete_selection(clipboard_c *cb) {
   struct cursor start = E.select->initial.y < E.select->final.y
                             ? E.select->initial
                             : E.select->final;
@@ -518,18 +535,21 @@ void delete_selection() {
                           : E.select->initial;
   if (start.y == end.y) {
     row *r = &E.r[start.y];
-    // strncat(deleted_text, &r->chars[start.x], end.x - start.x);
-
-    memmove(&r->chars[start.x], &r->chars[end.x], r->size - end.x + 1);
-    r->size -= end.x - start.x;
+    // Remove the selectedp text
+    // go through the row and remove the selected Text without memmove
+    if (start.x < end.x) {
+      memmove(&r->chars[start.x], &r->chars[end.x], r->size - end.x + 1);
+      r->size -= (end.x - start.x);
+      update_row(r);
+    } else {
+      memmove(&r->chars[end.x], &r->chars[start.x], r->size - start.x + 1);
+      r->size -= (start.x - end.x);
+      update_row(r);
+    }
     update_row(r);
   } else {
     row *r = &E.r[start.y];
     row *r2 = &E.r[end.y];
-
-    // Append the deleted text to the deleted_text string
-    // strncat(deleted_text, &r->chars[start.x], r->size - start.x);
-    // strncat(deleted_text, &r2->chars[0], end.x);
 
     memmove(&r->chars[start.x], &r2->chars[end.x], r2->size - end.x + 1);
     r->size = start.x + r2->size - end.x;
@@ -541,93 +561,12 @@ void delete_selection() {
     update_row(r);
     update_row(r2);
   }
+
+  clipboard_set_text(
+      cb,
+      "dklfadshlfkjsh\bsladfkhasdlkfjasfh\nfjasdlkfjashdfl\tdskfadshflaksj");
   E.cur = start;
   E.mode = NORMAL;
-}
-
-// move selection one line up
-void move_selection_up() {
-  if (E.select->initial.y == 0 && E.select->final.y == 0) {
-    return;
-  }
-  if (E.select->initial.y == 0) {
-    return;
-  }
-  E.select->initial.y--;
-  E.select->final.y--;
-  if (E.select->initial.x > E.r[E.select->initial.y].size) {
-    E.select->initial.x = E.r[E.select->initial.y].size;
-  }
-  if (E.select->final.x > E.r[E.select->final.y].size) {
-    E.select->final.x = E.r[E.select->final.y].size;
-  }
-}
-
-// move selection one line down
-void move_selection_down() {
-  if (E.select->initial.y == E.nrows - 1 && E.select->final.y == E.nrows - 1) {
-    return;
-  }
-  if (E.select->initial.y == E.nrows - 1) {
-    return;
-  }
-  E.select->initial.y++;
-  E.select->final.y++;
-  if (E.select->initial.x > E.r[E.select->initial.y].size) {
-    E.select->initial.x = E.r[E.select->initial.y].size;
-  }
-  if (E.select->final.x > E.r[E.select->final.y].size) {
-    E.select->final.x = E.r[E.select->final.y].size;
-  }
-}
-
-// move selection one character to the left
-void move_selection_left() {
-  if (E.select->initial.y == 0 && E.select->final.y == 0 &&
-      E.select->initial.x == 0 && E.select->final.x == 0) {
-    return;
-  }
-  if (E.select->initial.x == 0) {
-    if (E.select->initial.y > 0) {
-      E.select->initial.y--;
-      E.select->initial.x = E.r[E.select->initial.y].size;
-    }
-  } else {
-    E.select->initial.x--;
-  }
-  if (E.select->final.x == 0) {
-    if (E.select->final.y > 0) {
-      E.select->final.y--;
-      E.select->final.x = E.r[E.select->final.y].size;
-    }
-  } else {
-    E.select->final.x--;
-  }
-}
-
-// move selection one character to the right
-void move_selection_right() {
-  if (E.select->initial.y == E.nrows - 1 && E.select->final.y == E.nrows - 1 &&
-      E.select->initial.x == E.r[E.select->initial.y].size &&
-      E.select->final.x == E.r[E.select->final.y].size) {
-    return;
-  }
-  if (E.select->initial.x == E.r[E.select->initial.y].size) {
-    if (E.select->initial.y < E.nrows - 1) {
-      E.select->initial.y++;
-      E.select->initial.x = 0;
-    }
-  } else {
-    E.select->initial.x++;
-  }
-  if (E.select->final.x == E.r[E.select->final.y].size) {
-    if (E.select->final.y < E.nrows - 1) {
-      E.select->final.y++;
-      E.select->final.x = 0;
-    }
-  } else {
-    E.select->final.x++;
-  }
 }
 
 void enable_raw_mode() {
@@ -1379,7 +1318,7 @@ void search() {
   }
 }
 
-void on_keypress_normal() {
+void on_keypress_normal(clipboard_c *cb) {
   int c = read_key();
   switch (c) {
   case CTRL_KEY('x'):
@@ -1472,6 +1411,10 @@ void on_keypress_normal() {
 
   case ':':
     vim_prompt();
+    break;
+
+  case 'p':
+    paste_clipboard(cb);
     break;
 
   case 'd':
@@ -1580,27 +1523,15 @@ void on_keypress_insert() {
   E.hist.prev_key = c;
 }
 
-void on_keypress_visual() {
+void on_keypress_visual(clipboard_c *cb) {
 
   int c = read_key();
   switch (c) {
   case '\x1b':
     E.mode = NORMAL;
     break;
-  case 'J':
-    move_selection_up();
-    break;
-  case 'K':
-    move_selection_down();
-    break;
-  case 'H':
-    move_selection_left();
-    break;
-  case 'L':
-    move_selection_right();
-    break;
   case 'd':
-    delete_selection();
+    delete_selection(cb);
     break;
   case 'h':
     move_cursor(ARROW_LEFT);
@@ -1634,7 +1565,7 @@ int main(int argc, char *argv[]) {
   setlocale(LC_ALL, "");
   enable_raw_mode();
   init_editor();
-
+  clipboard_c *c = clipboard_new(NULL);
   if (argc >= 2) {
     editor_open(argv[1]);
   }
@@ -1644,11 +1575,11 @@ int main(int argc, char *argv[]) {
   while (1) {
     refresh_screen();
     if (E.mode == NORMAL)
-      on_keypress_normal();
+      on_keypress_normal(c);
     else if (E.mode == INSERT)
       on_keypress_insert();
     else if (E.mode == VISUAL)
-      on_keypress_visual();
+      on_keypress_visual(c);
   }
 
   return 0;

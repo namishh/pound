@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -g
-LDFLAGS = -lm
+LDFLAGS = -lm -lclipboard -lX11 -lxcb
 TARGET_EXEC := main.out
 
 BUILD_DIR := ./build
