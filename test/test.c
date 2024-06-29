@@ -9,8 +9,15 @@
 /*
 multiline comment bitch
 */
+
+
 void start(struct Server *server) {
   char buffer[BUFFER_SIZE];
+  
+  
+  
+  
+  
   int new_socket;
   int addrlen = sizeof(server->address);
 
@@ -55,6 +62,7 @@ void start(struct Server *server) {
     struct Route *route = search(request.URI);
     if (strstr(request.URI, "/api") != 0) {
       file = " ";
+      
       is_json = 1;
     }
     if (route == NULL) {

@@ -912,8 +912,8 @@ void insert_char_row(row *r, int at, int c) {
 }
 
 void insert_new_line() {
-  if (E.cur.x == 0) {
-    append_row(E.cur.y, "", 0);
+  if (E.cur.y == E.nrows) {
+    append_row(E.nrows, "", 0);
   } else {
     row *r = &E.r[E.cur.y];
     append_row(E.cur.y + 1, &r->chars[E.cur.x], r->size - E.cur.x);
@@ -921,9 +921,19 @@ void insert_new_line() {
     r->size = E.cur.x;
     r->chars[r->size] = '\0';
     update_row(r);
+
+    E.cur.y++;
+    // Auto-indenting
+    if (E.cur.y > 0) {
+      row *prev_row = &E.r[E.cur.y - 1];
+      int indent = 0;
+      while (indent < prev_row->size && prev_row->chars[indent] == ' ') {
+        insert_char_row(&E.r[E.cur.y], indent, ' ');
+        indent++;
+      }
+      E.cur.x = indent;
+    }
   }
-  E.cur.y++;
-  E.cur.x = 0;
 }
 
 void row_del_char(row *r, int at) {
