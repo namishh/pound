@@ -10,6 +10,4 @@ This editor is written from scratch and most of it is taken from [antirez/kilo](
 - [x] Auto completing brackets and quotes 
 - [x] Modal based (vim) editing 
 - [x] Much more fancier status bar
-- [ ] Multiple buffers 
 - [x] Selection based editing
-- [ ] Undo and Redo
