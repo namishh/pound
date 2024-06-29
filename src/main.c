@@ -1,3 +1,4 @@
+#include <X11/Xlib.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -83,6 +84,7 @@ struct editor_config {
   int nrows;
   char *filename;
   int rowoff;
+  char *reg;
   struct select *select;
   int coloff;
   row *r;
@@ -90,6 +92,7 @@ struct editor_config {
   MODE mode;
   int dirty;
   struct syntax *syntax;
+  struct editor_config *next;
 };
 
 enum editorHighlight {
@@ -137,7 +140,8 @@ void refresh_screen();
 char *start_prompt(char *prompt, void (*callback)(char *, int));
 void del_row(int at);
 void update_syntax(row *r);
-
+void update_row(row *r);
+void insert_char(int c);
 // buffer methods
 
 void buffer_append(struct buffer *buf, const char *s, int len) {
@@ -458,6 +462,8 @@ void draw_rows(struct buffer *b) {
             // Apply inverse video highlight
             buffer_append(b, "\x1b[7m", 4);
           }
+
+          // strcat(E.select->text, &c[j]);
         }
         if (iscntrl(c[j])) {
           char sym = (c[j] <= 26) ? '@' + c[j] : '?';
@@ -497,6 +503,130 @@ void draw_rows(struct buffer *b) {
     // clearing line by line instead of the whole screen
     buffer_append(b, "\x1b[K", 3);
     buffer_append(b, "\r\n", 2);
+  }
+}
+
+void delete_selection() {
+  // char *deleted_text = malloc(2000); // bad practive but i dont care
+  // deleted_text[0] = '\0';
+
+  struct cursor start = E.select->initial.y < E.select->final.y
+                            ? E.select->initial
+                            : E.select->final;
+  struct cursor end = E.select->initial.y < E.select->final.y
+                          ? E.select->final
+                          : E.select->initial;
+  if (start.y == end.y) {
+    row *r = &E.r[start.y];
+    // strncat(deleted_text, &r->chars[start.x], end.x - start.x);
+
+    memmove(&r->chars[start.x], &r->chars[end.x], r->size - end.x + 1);
+    r->size -= end.x - start.x;
+    update_row(r);
+  } else {
+    row *r = &E.r[start.y];
+    row *r2 = &E.r[end.y];
+
+    // Append the deleted text to the deleted_text string
+    // strncat(deleted_text, &r->chars[start.x], r->size - start.x);
+    // strncat(deleted_text, &r2->chars[0], end.x);
+
+    memmove(&r->chars[start.x], &r2->chars[end.x], r2->size - end.x + 1);
+    r->size = start.x + r2->size - end.x;
+    memmove(&r2->chars[0], &r2->chars[end.x], r2->size - end.x + 1);
+    r2->size -= end.x;
+    for (int i = start.y + 1; i <= end.y; i++) {
+      del_row(start.y + 1);
+    }
+    update_row(r);
+    update_row(r2);
+  }
+  E.cur = start;
+  E.mode = NORMAL;
+}
+
+// move selection one line up
+void move_selection_up() {
+  if (E.select->initial.y == 0 && E.select->final.y == 0) {
+    return;
+  }
+  if (E.select->initial.y == 0) {
+    return;
+  }
+  E.select->initial.y--;
+  E.select->final.y--;
+  if (E.select->initial.x > E.r[E.select->initial.y].size) {
+    E.select->initial.x = E.r[E.select->initial.y].size;
+  }
+  if (E.select->final.x > E.r[E.select->final.y].size) {
+    E.select->final.x = E.r[E.select->final.y].size;
+  }
+}
+
+// move selection one line down
+void move_selection_down() {
+  if (E.select->initial.y == E.nrows - 1 && E.select->final.y == E.nrows - 1) {
+    return;
+  }
+  if (E.select->initial.y == E.nrows - 1) {
+    return;
+  }
+  E.select->initial.y++;
+  E.select->final.y++;
+  if (E.select->initial.x > E.r[E.select->initial.y].size) {
+    E.select->initial.x = E.r[E.select->initial.y].size;
+  }
+  if (E.select->final.x > E.r[E.select->final.y].size) {
+    E.select->final.x = E.r[E.select->final.y].size;
+  }
+}
+
+// move selection one character to the left
+void move_selection_left() {
+  if (E.select->initial.y == 0 && E.select->final.y == 0 &&
+      E.select->initial.x == 0 && E.select->final.x == 0) {
+    return;
+  }
+  if (E.select->initial.x == 0) {
+    if (E.select->initial.y > 0) {
+      E.select->initial.y--;
+      E.select->initial.x = E.r[E.select->initial.y].size;
+    }
+  } else {
+    E.select->initial.x--;
+  }
+  if (E.select->final.x == 0) {
+    if (E.select->final.y > 0) {
+      E.select->final.y--;
+      E.select->final.x = E.r[E.select->final.y].size;
+    }
+  } else {
+    E.select->final.x--;
+  }
+}
+
+// move selection one character to the right
+void move_selection_right() {
+  if (E.select->initial.y == E.nrows - 1 && E.select->final.y == E.nrows - 1 &&
+      E.select->initial.x == E.r[E.select->initial.y].size &&
+      E.select->final.x == E.r[E.select->final.y].size) {
+    return;
+  }
+  if (E.select->initial.x == E.r[E.select->initial.y].size) {
+    if (E.select->initial.y < E.nrows - 1) {
+      E.select->initial.y++;
+      E.select->initial.x = 0;
+    }
+  } else {
+    E.select->initial.x++;
+  }
+  if (E.select->final.x == E.r[E.select->final.y].size) {
+    if (E.select->final.y < E.nrows - 1) {
+      E.select->final.y++;
+      E.select->final.x = 0;
+    }
+  } else {
+    E.select->final.x++;
   }
 }
 
@@ -797,6 +927,7 @@ void init_editor() {
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
   E.syntax = NULL;
+  E.reg = 0;
 
   E.select = malloc(sizeof(struct select));
 
@@ -870,7 +1001,7 @@ void move_cursor(int key) {
   case ARROW_RIGHT:
     if (r && E.cur.x < r->size) {
       E.cur.x++;
-    } else if (r && E.cur.x == r->size) {
+    } else if (r && E.cur.x == r->size && E.cur.y < E.nrows - 1) {
       E.cur.y++;
       E.cur.x = 0;
     }
@@ -1308,7 +1439,7 @@ void on_keypress_normal() {
     break;
 
   case 'G':
-    E.cur.y = E.nrows;
+    E.cur.y = E.nrows - 1;
     break;
   case 'g':
     E.cur.y = 0;
@@ -1359,8 +1490,11 @@ void on_keypress_insert() {
     break;
   case BACKSPACE:
   case CTRL_KEY('h'):
-  case DEL_KEY:
     del_char();
+    break;
+  case DEL_KEY:
+    if (c == DEL_KEY)
+      move_cursor(ARROW_RIGHT);
     break;
   case CTRL_KEY('l'):
     break;
@@ -1452,6 +1586,21 @@ void on_keypress_visual() {
   switch (c) {
   case '\x1b':
     E.mode = NORMAL;
+    break;
+  case 'J':
+    move_selection_up();
+    break;
+  case 'K':
+    move_selection_down();
+    break;
+  case 'H':
+    move_selection_left();
+    break;
+  case 'L':
+    move_selection_right();
+    break;
+  case 'd':
+    delete_selection();
     break;
   case 'h':
     move_cursor(ARROW_LEFT);
