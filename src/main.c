@@ -167,7 +167,6 @@ struct editor_config E;
 void die(const char *s) {
   write(STDOUT_FILENO, "\x1b[2J", 4);
   write(STDOUT_FILENO, "\x1b[H", 3);
-  perror(s);
   exit(1);
 }
 
@@ -518,7 +517,68 @@ void paste_clipboard(clipboard_c *cb) {
   free(text);
 }
 
+char *get_text_in_selection() {
+  struct cursor start = E.select->initial.y < E.select->final.y
+                            ? E.select->initial
+                            : E.select->final;
+  struct cursor end = E.select->initial.y < E.select->final.y
+                          ? E.select->final
+                          : E.select->initial;
+  // Check that the start and end cursors are within the bounds of the E.r array
+  if (start.y < 0 || start.y >= E.nrows || end.y < 0 || end.y >= E.nrows) {
+    return NULL;
+  }
+
+  int len = 0;
+  if (start.y == end.y) {
+    len = end.x - start.x;
+  } else {
+    row *r = &E.r[start.y];
+    len = r->size - start.x;
+    for (int i = start.y + 1; i < end.y; i++) {
+      len += E.r[i].size + 1; // +1 for newline character
+    }
+    len += end.x;
+  }
+
+  char *selected_text = malloc(len + 1); // +1 for null terminator
+  if (selected_text == NULL) {
+    return NULL;
+  }
+
+  int pos = 0;
+  if (start.y == end.y) {
+    strncpy(selected_text, &E.r[start.y].chars[start.x], len);
+    pos = len;
+  } else {
+    row *r = &E.r[start.y];
+    strncpy(selected_text, &r->chars[start.x], r->size - start.x);
+    pos = r->size - start.x;
+    for (int i = start.y + 1; i < end.y; i++) {
+      selected_text[pos++] = '\n';
+      strncpy(selected_text + pos, E.r[i].chars, E.r[i].size);
+      pos += E.r[i].size;
+    }
+    strncpy(selected_text + pos, E.r[end.y].chars, end.x);
+    pos += end.x;
+  }
+
+  selected_text[pos] = '\0';
+
+  for (int i = 0; i < pos; i++) {
+    if (selected_text[i] == '\n') {
+      selected_text[i] = '\\';
+      selected_text[i + 1] = 'n';
+      memmove(selected_text + i + 2, selected_text + i + 1, pos - i);
+      pos++;
+    }
+  }
+
+  return selected_text;
+}
+
 void delete_selection(clipboard_c *cb) {
+  // clipboard_set_text(cb, get_text_in_selection());
   struct cursor start = E.select->initial.y < E.select->final.y
                             ? E.select->initial
                             : E.select->final;
@@ -552,10 +612,6 @@ void delete_selection(clipboard_c *cb) {
     update_row(r);
     update_row(r2);
   }
-
-  clipboard_set_text(
-      cb,
-      "dklfadshlfkjsh\bsladfkhasdlkfjasfh\nfjasdlkfjashdfl\tdskfadshflaksj");
   E.cur = start;
   E.mode = NORMAL;
 }
@@ -1521,8 +1577,17 @@ void on_keypress_visual(clipboard_c *cb) {
   case '\x1b':
     E.mode = NORMAL;
     break;
+  case 'y':
+    clipboard_set_text(cb, get_text_in_selection());
+    E.select->initial = E.cur;
+    E.select->final = E.cur;
+    E.mode = NORMAL;
+    break;
   case 'd':
     delete_selection(cb);
+    E.select->initial = E.cur;
+    E.select->final = E.cur;
+    E.mode = NORMAL;
     break;
   case 'h':
     move_cursor(ARROW_LEFT);
