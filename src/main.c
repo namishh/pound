@@ -446,20 +446,12 @@ void draw_rows(struct buffer *b) {
       int j;
       int end_x;
       int start_x;
-      struct cursor start = E.select->initial.y < E.select->final.y
-                                ? E.select->initial
-                                : E.select->final;
-      struct cursor end = E.select->initial.y < E.select->final.y
-                              ? E.select->final
-                              : E.select->initial;
-
-      if (start.x == end.x) {
-
-        start = E.select->initial.x < E.select->final.x ? E.select->initial
-                                                        : E.select->final;
-        end = E.select->initial.x < E.select->final.x ? E.select->final
-                                                      : E.select->initial;
-      }
+      struct cursor start;
+      struct cursor end;
+      start = E.select->initial.y < E.select->final.y ? E.select->initial
+                                                      : E.select->final;
+      end = E.select->initial.y < E.select->final.y ? E.select->final
+                                                    : E.select->initial;
       for (j = 0; j < len; j++) {
         if (E.mode == VISUAL && filerow >= start.y && filerow <= end.y) {
           start_x = (filerow == E.select->initial.y) ? E.select->initial.x : 0;
@@ -546,7 +538,6 @@ void delete_selection(clipboard_c *cb) {
       r->size -= (start.x - end.x);
       update_row(r);
     }
-    update_row(r);
   } else {
     row *r = &E.r[start.y];
     row *r2 = &E.r[end.y];
